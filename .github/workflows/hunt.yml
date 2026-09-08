@@ -72,6 +72,29 @@ jobs:
       - name: Run full keyhunter cycle
         run: python night_run.py
 
+      # находки — в ПРИВАТНЫЙ vault-репо (полный стор доступен для просмотра,
+      # не светится в публичной репе и не тонет в кэше)
+      - name: Push finds to vault
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          [ -f keyhunter_found.jsonl ] || exit 0
+          rm -rf vault
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/Ins2lt/night-vault.git" vault || mkdir vault
+          cp keyhunter_found.jsonl vault/ 2>/dev/null || true
+          cp keyhunter_dead.jsonl vault/ 2>/dev/null || true
+          cd vault
+          git config user.name "night-bot"
+          git config user.email "night-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            git commit -m "vault $(date -u +%FT%TZ)"
+            git push || echo "push failed — следующий цикл повторит"
+          fi
+
       - name: Save hunter state
         if: always()
         uses: actions/cache/save@v4
