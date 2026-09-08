@@ -2,3 +2,4 @@ requests
 cloudscraper
 psycopg2-binary
 pymysql
+mmh3
