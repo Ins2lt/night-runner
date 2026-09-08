@@ -44,6 +44,11 @@ try:
 except Exception as e:
     kh.log("keysmith err: %s" % e)
 
+try:
+    kh.opendb_sweep(CYCLE)
+except Exception as e:
+    kh.log("opendb err: %s" % e)
+
 kh.log("=== night_run: цикл #%d завершён ===" % CYCLE)
 
 # P0-ФИКС: некоторые треди keyhunter (висячие сокеты без таймаута) не дают
