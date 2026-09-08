@@ -9499,6 +9499,12 @@ def validate(key, base_hint, tag, origin):
             # против openai.com = 401). НЕ убиваем — пробуем следующую базу.
             continue
         elif ids:
+            # Чистый 401 от ЛЮБОГО чат-проба = ключ на этой базе мёртв, точка.
+            # Раньше listed_only прилипал, когда часть проб 401'ила, а часть
+            # таймаутила (жирный /models у aimlapi/ppq): мусор летел в TG как
+            # "🟡 модели листятся". 401 сильнее сетевого шума — дальше по базам.
+            if any(s == "invalid_key" for s in states_detail.values()):
+                continue
             # АНТИ-authless-models: aimlapi/ppq и ко листят /models БЕЗ auth —
             # тогда listed_only ничего не доказывает о ключе (мусорные слаги
             # получали "звёзды" и летели в стор/TG). Контроль заведомо мёртвым
