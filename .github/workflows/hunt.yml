@@ -16,7 +16,7 @@ concurrency:
 jobs:
   hunt:
     runs-on: ubuntu-latest
-    timeout-minutes: 28
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -46,6 +46,7 @@ jobs:
             youtube_state.json
             zoomeye_state.json
             kh_monitor.log
+            shodan-keys.json
           key: hunter-state-${{ github.run_id }}
           restore-keys: |
             hunter-state-
@@ -116,6 +117,7 @@ jobs:
             youtube_state.json
             zoomeye_state.json
             kh_monitor.log
+            shodan-keys.json
           key: hunter-state-${{ github.run_id }}
 
       # keepalive: без коммитов GitHub выключает scheduled workflow через

