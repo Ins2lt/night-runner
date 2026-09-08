@@ -211,7 +211,13 @@ def gh_token():
 
 LOG_LOCK = threading.RLock()
 
-PROXY = requests.Session()  # системный прокси (xray)
+PROXY = requests.Session()  # локальный прокси (xray/nekoray)
+# ЯВНЫЙ прокси: env-переменных в системе НЕТ, а api.telegram.org на этом
+# канале заблокирован — без явного прокси весь TG-постинг молча таймаутил
+# (диагноз 2026-09-08: локальные находки не доходили до чата, GH-бот постил
+# нормально). На GH-раннере 127.0.0.1:10809 = instant refuse -> DIRECT.
+_p = os.environ.get("KH_PROXY", "http://127.0.0.1:10809")
+PROXY.proxies = {"http": _p, "https": _p}
 DIRECT = requests.Session()
 DIRECT.trust_env = False
 # Пулы соединений: валидация гонит десятки параллельных проб через ОДНУ
