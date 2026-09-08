@@ -1,0 +1,113 @@
+name: night-hunt
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # каждые 30 минут, 24/7 — public репа = минуты бесплатные
+  workflow_dispatch: {}       # ручной запуск кнопкой в Actions
+
+permissions:
+  contents: write             # keepalive-коммит (иначе schedule уснёт через 60 дней тишины)
+
+concurrency:
+  group: night-hunt           # не пускаем наложение прогонов
+  cancel-in-progress: false
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # Стор/дедуп живут в Actions cache (НЕ в git — репа публичная,
+      # ключи в код не попадают и в историю не утекают).
+      - name: Restore hunter state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            keyhunter_found.jsonl
+            keyhunter_found_dedup.jsonl
+            keyhunter_dead.jsonl
+            keyhunter_seen.json
+            keyhunter_attempts.json
+            query_stats.json
+            query_evolved.json
+            source_health.json
+            env_smtp_seen.json
+            cc_sweep_known.json
+            open_infra_known.json
+            sourcegraph_state.json
+            youtube_state.json
+            zoomeye_state.json
+            kh_monitor.log
+          key: hunter-state-${{ github.run_id }}
+          restore-keys: |
+            hunter-state-
+
+      - run: pip install -r requirements.txt
+
+      - name: Build config from secrets
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_POOL: ${{ secrets.GH_POOL }}
+          SHODAN_KEY: ${{ secrets.SHODAN_KEY }}
+          SHODAN_KEYS_JSON: ${{ secrets.SHODAN_KEYS_JSON }}
+          URLSCAN_KEY: ${{ secrets.URLSCAN_KEY }}
+          KAGGLE_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
+          CENSYS_KEY: ${{ secrets.CENSYS_KEY }}
+          LEAKIX_KEY: ${{ secrets.LEAKIX_KEY }}
+          VT_KEY: ${{ secrets.VT_KEY }}
+          FOFA_KEY: ${{ secrets.FOFA_KEY }}
+          ZOOMEYE_KEY: ${{ secrets.ZOOMEYE_KEY }}
+          NETLAS_KEY: ${{ secrets.NETLAS_KEY }}
+        run: python make_config.py
+
+      - name: Run full keyhunter cycle
+        run: python night_run.py
+
+      - name: Save hunter state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            keyhunter_found.jsonl
+            keyhunter_found_dedup.jsonl
+            keyhunter_dead.jsonl
+            keyhunter_seen.json
+            keyhunter_attempts.json
+            query_stats.json
+            query_evolved.json
+            source_health.json
+            env_smtp_seen.json
+            cc_sweep_known.json
+            open_infra_known.json
+            sourcegraph_state.json
+            youtube_state.json
+            zoomeye_state.json
+            kh_monitor.log
+          key: hunter-state-${{ github.run_id }}
+
+      # keepalive: без коммитов GitHub выключает scheduled workflow через
+      # 60 дней неактивности репы. Один timestamp-файл держит её живой.
+      - name: Keepalive commit
+        if: always()
+        run: |
+          git config user.name "night-bot"
+          git config user.email "night-bot@users.noreply.github.com"
+          date -u +%FT%TZ > .keepalive
+          git add .keepalive
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            git commit -m "keepalive $(date -u +%FT%TZ)"
+            git fetch origin
+            git rebase origin/main || git rebase --abort
+            git push || echo "push failed — следующий цикл повторит"
+          fi

@@ -1,0 +1,20 @@
+# НИКОГДА не коммитим: секреты, генереный конфиг, стор, логи
+keyhunter.json
+shodan-keys.json
+keyhunter_found.jsonl
+keyhunter_found_dedup.jsonl
+keyhunter_dead.jsonl
+keyhunter_seen.json
+keyhunter_attempts.json
+query_stats.json
+query_evolved.json
+source_health.json
+env_smtp_seen.json
+cc_sweep_known.json
+open_infra_known.json
+sourcegraph_state.json
+youtube_state.json
+zoomeye_state.json
+kh_monitor.log
+__pycache__/
+*.pyc
