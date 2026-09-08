@@ -3092,141 +3092,6 @@ class Shodan(Source):
         return out
 
 
-class CommonCrawl(Source):
-    """Common Crawl CDX — кравл всего интернета, бесплатно и без ключа.
-    Ищем срезы .env/бэкапов конфигов, забираем WARC-записи range-GET'ами,
-    режем WARC+HTTP хедеры -> чистый body файла (там и лежат ключи).
-    Бережём CC: ОДИН url-паттерн за цикл, ротация по страницам выдачи."""
-
-    name = "commoncrawl"
-    CDX = "https://index.commoncrawl.org/%s-index"
-    DATA = "https://data.commoncrawl.org/"
-    QUERIES = (
-        {"url": "*.env", "filter": "status:200", "collapse": "urlkey"},
-        {"url": "*.env.bak", "filter": "status:200", "collapse": "urlkey"},
-        {"url": "*.env.old", "filter": "status:200", "collapse": "urlkey"},
-        {"url": "*.env.production", "filter": "status:200", "collapse": "urlkey"},
-        {"url": "*.env.local", "filter": "status:200", "collapse": "urlkey"},
-        {"url": "*.sql", "filter": "status:200", "collapse": "urlkey"},
-    )
-    MARKERS = (
-        "sk-",
-        "API_KEY",
-        "api_key",
-        "AIza",
-        "gsk_",
-        "hf_",
-        "oat01",
-        "postgresql://",
-        "postgres://",
-        "mysql://",
-        "mongodb",
-        "redis://",
-        "DATABASE_URL",
-        "SECRET",
-        "PASSWORD",
-        "aws_secret",
-        "-----BEGIN",
-    )
-    _INDEX_ID = None
-
-    def _latest_index(self):
-        if CommonCrawl._INDEX_ID:
-            return CommonCrawl._INDEX_ID
-        try:
-            r = requests.get(
-                "https://index.commoncrawl.org/collinfo.json",
-                timeout=(5, 10),
-                verify=False,
-            )
-            CommonCrawl._INDEX_ID = r.json()[0]["id"]  # "CC-MAIN-2026-XX"
-        except Exception:
-            CommonCrawl._INDEX_ID = ""
-        return CommonCrawl._INDEX_ID
-
-    def _warc_body(self, rec):
-        """range GET среза -> gunzip -> WARC-хедеры долой -> HTTP-хедеры долой."""
-        try:
-            off, ln = int(rec["offset"]), int(rec["length"])
-            r = requests.get(
-                self.DATA + rec["filename"],
-                headers={"Range": "bytes=%d-%d" % (off, off + ln - 1)},
-                timeout=(6, 20),
-                verify=False,
-            )
-            if r.status_code not in (200, 206):
-                return None
-            import zlib
-
-            raw = zlib.decompress(r.content, 16 + zlib.MAX_WBITS)
-            p = raw.find(b"\r\n\r\n")  # конец WARC-хедеров
-            if p < 0:
-                return None
-            rest = raw[p + 4 :]
-            p2 = rest.find(b"\r\n\r\n")  # конец HTTP-хедеров
-            if p2 < 0:
-                return None
-            txt = rest[p2 + 4 :].decode("utf-8", errors="replace")
-            if len(txt) < 20:
-                return None
-            return txt[:300_000]
-        except Exception:
-            return None
-
-    def fetch(self):
-        idx = self._latest_index()
-        if not idx:
-            return []
-        out = []
-        deadline = time.time() + 150
-        cycle = int(time.time() // 1800)
-        q = dict(self.QUERIES[cycle % len(self.QUERIES)])
-        q["output"] = "json"
-        q["pageSize"] = "200"
-        q["page"] = str((cycle // len(self.QUERIES)) % 25)  # гуляем по выдаче
-        try:
-            r = requests.get(self.CDX % idx, params=q, timeout=(10, 40), verify=False)
-            if r.status_code != 200:
-                return []
-            recs = []
-            seen_d = set()
-            for line in r.text.splitlines():
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                d = rec.get("digest")
-                if d and d not in seen_d and rec.get("filename"):
-                    seen_d.add(d)
-                    recs.append(rec)
-        except Exception:
-            return []
-        # дедуп и кап: 30 файлов за цикл
-        recs = recs[:30]
-
-        def grab(rec):
-            txt = self._warc_body(rec)
-            if txt and any(m in txt for m in self.MARKERS):
-                return [(txt, "commoncrawl:%s" % rec.get("url", "")[:120])]
-            return []
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
-            futs = [ex.submit(grab, rec) for rec in recs]
-            for f in concurrent.futures.as_completed(futs):
-                if time.time() >= deadline:
-                    break
-                try:
-                    out.extend(f.result())
-                except Exception:
-                    continue
-        if out:
-            log(
-                "  [commoncrawl] %d файлов с ключами из %d срезов"
-                % (len(out), len(recs))
-            )
-        return out
-
-
 class Fofa(Source):
     name = "fofa"
 
@@ -6695,7 +6560,6 @@ ALL_SOURCE_CLASSES = [
     VirusTotal,
     Shodan,
     Fofa,
-    CommonCrawl,
     ZoomEye,
     CriminalIP,
     OpenInfraSweep,
@@ -10630,8 +10494,6 @@ def run_sources(extra_paths=()):
         "internetdb",
         # Unconventional: глобальный код-поиск без ключа
         "sourcegraph",
-        # 🌐 кравл всего интернета без ключа: .env/дампы срезами
-        "commoncrawl",
         # 📡 TG-поисковики: контент каналов сцены (комблисты/аккаунты)
         "tg-search",
     }
