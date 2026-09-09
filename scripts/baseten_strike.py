@@ -44,20 +44,22 @@ OAT_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_\-]{20,}")
 ORT_RE = re.compile(r"sk-ant-ort01-[A-Za-z0-9_\-]{20,}")
 
 HF_QUERIES = [
+    "refreshToken claudeAiOauth",
+    "oat01",
+    "ort01",
     "basetenApiKey",
     "trussrc",
     "BASETEN_API_KEY",
     "baseten api_key",
     "inference.baseten.co",
-    "refreshToken claudeAiOauth",
-    "oat01",
 ]
+PAGES = (1, 2, 3, 4, 5)
 
-print("=== HF full-text сбор ===")
+print("=== HF full-text сбор (глубокий: 5 страниц) ===")
 files = []
 for q in HF_QUERIES:
     for typ, seg in (("space", "spaces"), ("dataset", "datasets"), ("model", "")):
-        for page in (1, 2):
+        for page in PAGES:
             try:
                 url = (
                     "https://huggingface.co/api/search/full-text"

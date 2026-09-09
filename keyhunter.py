@@ -2850,6 +2850,14 @@ class Shodan(Source):
         "/.claude/.credentials.json",
         "/cookies.txt",  # экспортнутые куки (netscape-формат)
         "/access.log",  # лог-дампы с Cookie:-заголовками юзеров
+        # 🔷 baseten/truss: конфиги truss CLI на вебрутах (8.32 api_key)
+        "/.trussrc",
+        "/trussrc",
+        "/.config/truss/.trussrc",
+        # 🎫 codex: auth.json на вебрутах (ChatGPT-подписки)
+        "/.codex/auth.json",
+        "/codex/auth.json",
+        "/auth.json",
     )
 
     def _live_scrape(self, hosts):
@@ -3176,7 +3184,8 @@ class AnonFtp(Source):
         r"(?i)(\.env($|\.)|\.credentials\.json|auth\.json|id_rsa$|\.sql$|"
         r"backup|dump|\.claude|\.codex|cookies?\.|cookie|shadow$|"
         r"config\.(json|ya?ml|php|inc|xml)|database\.(sql|db)|"
-        r"tokens?\.(json|txt)|session|\.har$|\.kube(config)?)"
+        r"tokens?\.(json|txt)|session|\.har$|\.kube(config)?|"
+        r"trussrc|\.trussrc|\.codex)"
     )
     SKIP_DIR = re.compile(
         r"(?i)/?(pub|public|incoming|uploads?|debian|ubuntu|centos|mirror(s)?|"
