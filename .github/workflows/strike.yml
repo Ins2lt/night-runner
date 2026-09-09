@@ -1,0 +1,29 @@
+name: baseten-strike
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "17 */3 * * *"   # каждые 3 часа — HF-фуллтекст с чистого IP
+
+permissions:
+  contents: read
+
+concurrency:
+  group: baseten-strike
+  cancel-in-progress: false
+
+jobs:
+  strike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - name: Strike (HF full-text + management-судья)
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+        run: python scripts/baseten_strike.py
