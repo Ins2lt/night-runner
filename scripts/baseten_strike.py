@@ -44,6 +44,7 @@ OAT_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_\-]{20,}")
 ORT_RE = re.compile(r"sk-ant-ort01-[A-Za-z0-9_\-]{20,}")
 
 HF_QUERIES = [
+    "sk-ant-oat01",
     "refreshToken claudeAiOauth",
     "oat01",
     "ort01",
@@ -51,20 +52,19 @@ HF_QUERIES = [
     "trussrc",
     "BASETEN_API_KEY",
     "baseten api_key",
-    "inference.baseten.co",
 ]
-PAGES = (1, 2, 3, 4, 5)
+OFFSETS = (0, 50, 100, 150, 200)
 
-print("=== HF full-text сбор (глубокий: 5 страниц) ===")
+print("=== HF full-text сбор (offset-пагинация) ===")
 files = []
 for q in HF_QUERIES:
     for typ, seg in (("space", "spaces"), ("dataset", "datasets"), ("model", "")):
-        for page in PAGES:
+        for off in OFFSETS:
             try:
                 url = (
                     "https://huggingface.co/api/search/full-text"
-                    "?q=%s&type=%s&limit=20&page=%s"
-                    % (urllib.parse.quote(q), typ, page)
+                    "?q=%s&type=%s&limit=50&offset=%s"
+                    % (urllib.parse.quote(q), typ, off)
                 )
                 r = requests.get(
                     url, headers={"Accept": "application/json"}, timeout=(8, 20)
@@ -72,7 +72,7 @@ for q in HF_QUERIES:
                 if r.status_code != 200:
                     continue
                 total = r.json().get("estimatedTotalHits")
-                for hit in (r.json().get("hits") or [])[:20]:
+                for hit in (r.json().get("hits") or [])[:50]:
                     owner, repo, path = (
                         hit.get("repoOwner"),
                         hit.get("repoName"),
@@ -88,7 +88,7 @@ for q in HF_QUERIES:
                     )
                     if raw not in [f[0] for f in files]:
                         files.append((raw, "%s/%s/%s" % (owner, repo, path)))
-                if page == 1:
+                if off == 0:
                     print("  %-34s %-8s total=%s" % (q, typ, total))
             except Exception as e:
                 print("  hf err %s %s" % (q, type(e).__name__))
