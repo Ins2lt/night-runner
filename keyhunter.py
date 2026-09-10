@@ -1912,6 +1912,13 @@ class GitHubCode(Source):
             '"claude-opus-4-8" "apiKey"',
             '"claude-fable-5" "sk-ant"',
             '"glm-5.3" "apiKey" NOT path:README',
+            # muse-spark (aimlapi-агрегатор) + cline free-конфиги
+            '"muse-spark" "sk-"',
+            '"muse-spark-1.3" apiKey',
+            '"muse-spark" extension:env',
+            '"api.aimlapi.com" "sk-" extension:env',
+            '"AIML_API_KEY"',
+            '"AIMLAPI_KEY"',
             '"AIzaSy" extension:env',
             # НЕОРДИНАРНО: dotfiles с живыми Claude Code кредами
             # ~/.claude/.credentials.json содержит refreshToken (минтит свежий
@@ -9234,7 +9241,7 @@ def khash(key, base):
 STAR_RE = re.compile(
     r"(opus-4-[5-9]|opus-4\.[5-9]|opus-5|fable|sonnet-5|gpt-5\.[4-6]|glm-5\.[23]|"
     r"deepseek-v4|kimi-k3|kimi-k2\.[5-9]|minimax-m3|qwen-?3\.8|gemini-3|grok-4\.[2-9]|"
-    r"nemotron-3|mimo-v2|minimax-m2|deepseek-r2)",
+    r"nemotron-3|mimo-v2|minimax-m2|deepseek-r2|muse-spark|muse-glimmer)",
     re.I,
 )
 EMBED_RE = re.compile(r"(bge|embedding|embed-|gte-|text-embedding)", re.I)
@@ -9260,6 +9267,8 @@ def _star_rank(m):
         return 4
     if "glm-5.3" in ml or "deepseek-v4-pro" in ml or "kimi-k3" in ml:
         return 5
+    if "muse-spark" in ml or "muse-glimmer" in ml:
+        return 6
     return 9
 
 
