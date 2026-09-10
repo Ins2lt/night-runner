@@ -8759,6 +8759,8 @@ class PostmanHunt(Source):
         "doppler",
     )
     PER_CYCLE = 4
+    GATE = 900  # 15 мин между прогонами: postman search троттлит IP жёстко
+    # (серия запросов подряд = 400 rateLimitedError на ~час)
     _PROXY = "https://www.postman.com/_api/ws/proxy"
     _STATE = os.path.join(HERE, "postman_state.json")
 
@@ -8768,17 +8770,19 @@ class PostmanHunt(Source):
             st = json.load(open(self._STATE, encoding="utf-8"))
         except Exception:
             st = {}
+        # гейт: не чаще раза в 15 минут (иначе rate-limit бан)
+        if time.time() - float(st.get("ts") or 0) < self.GATE:
+            return []
+        st["ts"] = time.time()
         seen_ids = set(st.get("seen") or [])
         rot = int(time.time() // 900)
         qs = [
             self.QUERIES[(rot + i) % len(self.QUERIES)] for i in range(self.PER_CYCLE)
         ]
-        sess = requests.Session()
-        sess.trust_env = False
-        sess.headers.update(
-            {"Content-Type": "application/json", "X-Entity-Team-Id": "0"}
-        )
-        ws_ids, coll_ids, env_ids = [], [], []
+        # http()-транспорт тулзы (авто-пин proxy/direct): прямой IP постман
+        # банит за частые поиски (400 rateLimitedError), прокси чист.
+        _HDR = {"Content-Type": "application/json", "X-Entity-Team-Id": "0"}
+        ws_ids, coll_ids, env_ids, req_ids = [], [], [], []
 
         def _collect_ids(obj):
             """Рекурсивный сбор id по типовым полям постмана."""
@@ -8831,9 +8835,10 @@ class PostmanHunt(Source):
 
         for q in qs:
             try:
-                r = sess.post(
+                r = http(
+                    "POST",
                     self._PROXY,
-                    json={
+                    json_body={
                         "service": "search",
                         "method": "POST",
                         "path": "/search-all",
@@ -8851,66 +8856,109 @@ class PostmanHunt(Source):
                             "domain": "public",
                         },
                     },
+                    headers=_HDR,
                     timeout=(12, 25),
-                    verify=False,
                 )
+                if r.status_code in (400, 429):
+                    # rate-limit postman-поиска (400 rateLimitedError) —
+                    # не долбим: стоп до следующего цикла
+                    log("  [postman] rate-limit (%s) — пауза источника" % r.status_code)
+                    break
                 if r.status_code != 200:
                     continue
-                data = r.json().get("data") or []
-                log("  [postman] %r: %d хитов" % (q, len(data)))
-                for item in data:
-                    _collect_ids(item)
+                data = r.json().get("data") or {}
+                # data — DICT {entityType: [hits]}, не список! (проверено
+                # живьём: {"collection": [{"document": {...}}], ...})
+                hits = []
+                if isinstance(data, dict):
+                    for _et, arr in data.items():
+                        if isinstance(arr, list):
+                            hits.extend(arr)
+                elif isinstance(data, list):
+                    hits = data
+                log("  [postman] %r: %d хитов" % (q, len(hits)))
+                for item in hits:
+                    if not isinstance(item, dict):
+                        continue
+                    doc = item.get("document")
+                    doc = doc if isinstance(doc, dict) else item
+                    etype = str(doc.get("entityType") or "")
+                    did = doc.get("id")
+                    if did and isinstance(did, str):
+                        if "collection" in etype:
+                            coll_ids.append(did)
+                        elif "workspace" in etype:
+                            ws_ids.append(did)
+                        elif "environment" in etype:
+                            env_ids.append(did)
+                        elif "request" in etype:
+                            req_ids.append(did)
+                    for ws in doc.get("workspaces") or []:
+                        if isinstance(ws, dict) and ws.get("id"):
+                            ws_ids.append(ws["id"])
+                    _collect_ids(doc)
             except Exception:
                 continue
-            time.sleep(1.2)
+            time.sleep(2.5)  # postman search throttles агрессивно (400 rate-limited)
 
         # детальный обход: workspace -> коллекции/энвы; коллекции/энвы напрямую
         def _fetch_json(path):
             try:
-                r = sess.get(
+                r = http(
+                    "GET",
                     "https://www.postman.com/_api/" + path,
                     timeout=(10, 20),
-                    verify=False,
                 )
-                if r.status_code == 200:
+                if r is not None and r.status_code == 200:
                     return r.json()
             except Exception:
                 pass
             return None
 
+        # детальный обход. Проверено живьём (2026-09-10):
+        #  - /_api/request/{id}         -> 200, в data: owner + collection id
+        #  - /_api/collection/{owner}-{cid}?populate=true -> ПОЛНЫЙ контент
+        #    (220KB: requests+headers+scripts). Без populate = только мета.
+        #  - uid-форма id у коллекций из поиска УЖЕ owner-embedded.
+        #  - workspace/{id}/collection = 404 (путь из доки устарел) — не ходим.
         detail_budget = 30
-        for wid in list(dict.fromkeys(ws_ids))[:10]:
+
+        # request-хиты: достаём owner+collection, сливаем сам request как чанк
+        for rid in list(dict.fromkeys(req_ids))[:8]:
             if detail_budget <= 0:
                 break
-            if wid in seen_ids:
+            if rid in seen_ids:
                 continue
-            seen_ids.add(wid)
-            wj = _fetch_json("workspace/%s" % wid)
+            seen_ids.add(rid)
+            rj = _fetch_json("request/%s" % rid)
             detail_budget -= 1
-            if not wj:
+            if not rj:
                 continue
-            # коллекции и энвы воркспейса
-            for coll_path in ("collection", "environment"):
-                lst = _fetch_json("workspace/%s/%s" % (wid, coll_path))
-                detail_budget -= 1
-                if isinstance(lst, list):
-                    for it in lst[:6]:
-                        cid = it.get("id") if isinstance(it, dict) else None
-                        if not cid or cid in seen_ids:
-                            continue
-                        seen_ids.add(cid)
-                        (coll_ids if coll_path == "collection" else env_ids).append(cid)
-                if detail_budget <= 0:
-                    break
+            d = rj.get("data") or {}
+            try:
+                out.append(
+                    (json.dumps(rj, ensure_ascii=False)[:30000], "postman:request")
+                )
+            except Exception:
+                pass
+            owner, colid = d.get("owner"), d.get("collection")
+            if colid:
+                coll_ids.append(("%s-%s" % (owner, colid)) if owner else colid)
 
         for cid in list(dict.fromkeys(coll_ids))[: max(0, min(12, detail_budget))]:
-            cj = _fetch_json("collection/%s" % cid)
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            cj = _fetch_json("collection/%s?populate=true" % cid)
             detail_budget -= 1
             if cj:
                 out.append(
                     (json.dumps(cj, ensure_ascii=False)[:120000], "postman:collection")
                 )
         for eid in list(dict.fromkeys(env_ids))[: max(0, min(8, detail_budget))]:
+            if eid in seen_ids:
+                continue
+            seen_ids.add(eid)
             ej = _fetch_json("environment/%s" % eid)
             detail_budget -= 1
             if ej:
