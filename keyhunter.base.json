@@ -74,7 +74,24 @@
     "baseten_api_key",
     "basetenApiKey",
     "sk-ant-sid02",
-    "sk-ant-sid01 sessionKey"
+    "sk-ant-sid01 sessionKey",
+    "ZHIPU_API_KEY=",
+    "MOONSHOT_API_KEY=",
+    "open.bigmodel.cn",
+    "api.moonshot.cn",
+    "api.z.ai",
+    "BASETEN_API_KEY=",
+    "DEEPINFRA_API_KEY=",
+    "NOVITA_API_KEY=",
+    "CEREBRAS_API_KEY=",
+    "SAMBANOVA_API_KEY=",
+    "CHUTES_API_KEY=",
+    "HYPERBOLIC_API_KEY=",
+    "FEATHERLESS_API_KEY=",
+    "SUPABASE_SERVICE_ROLE_KEY=",
+    "AZURE_OPENAI_API_KEY=",
+    "WorkosCursorSessionToken=",
+    "kimi-k3 api_key"
   ],
   "shodan_queries": [
     "http.html:\"sk-ant-api03\"",
@@ -184,6 +201,8 @@
   "source_timeout": 900,
   "shodan_budget": 780,
   "shodan_page_mult": 2,
-  "disabled_sources": ["open-infra"],
+  "disabled_sources": [
+    "open-infra"
+  ],
   "validate_budget": 720
 }
