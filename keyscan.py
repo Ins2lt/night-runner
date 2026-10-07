@@ -2168,6 +2168,14 @@ class GitHubCode(Source):
             '"sk-" "claude-opus"',
             '"sk-ant-" "claude-opus-4"',
             '"sk-or-v1" "opus"',
+            # 07.10 OR-PACK: жирные sk-or (продовые .env, vercel/frontend-утечки)
+            '"OPENROUTER_API_KEY" path:.env',
+            '"OPENROUTER_API_KEY" extension:yml',
+            '"OPENROUTER_KEY"',
+            '"NEXT_PUBLIC_OPENROUTER',
+            'filename:docker-compose "openrouter"',
+            '"sk-or-v1-" extension:json',
+            '"openrouter" filename:config.yaml',
             # крупные relay (opus/fable живут тут, не сканируются GitHub)
             '"api.weelinking.com" "sk-"',
             '"api.laozhang.ai" "sk-"',
@@ -3573,6 +3581,10 @@ class Shodan(Source):
         ('http.html:"Authorization: Bearer sk-"', 2),
         # openrouter / openai proj
         ('http.html:"sk-or-"', 3),
+        (
+            'http.html:"sk-or-v1-"',
+            3,
+        ),  # 07.10: жирные OR вылезают в html чаще, чем кажется
         ('http.html:"sk-proj-"', 4),
         # волна 2: relay-панели и провайдер-конфиги
         ('http.html:"one-api"', 5),  # 3515 relay-панелей
@@ -4616,6 +4628,9 @@ class HFSearch(Source):
         "basetenApiKey",
         "trussrc",
         "BASETEN_API_KEY",
+        # 07.10: openrouter-жиряки в HF (spaces/datasets с OPENROUTER_API_KEY)
+        "OPENROUTER_API_KEY",
+        "sk-or-v1",
     ]
 
     def fetch(self):

@@ -101,7 +101,10 @@
     "api.evolink.ai sk-",
     "api.zhehentiaohe.cn sk-",
     "pbtest.neusis.ai sk-",
-    "new-api sk- gpt-6"
+    "new-api sk- gpt-6",
+    "OPENROUTER_API_KEY",
+    "NEXT_PUBLIC_OPENROUTER",
+    "openrouter sk-or-v1"
   ],
   "shodan_queries": [
     "http.html:\"sk-ant-api03\"",
@@ -204,7 +207,10 @@
     "\"api.evolink.ai\" \"sk-\"",
     "\"api.zhehentiaohe.cn\" \"sk-\"",
     "\"pbtest.neusis.ai\" \"sk-\"",
-    "\"/api/pricing\" \"sk-\""
+    "\"/api/pricing\" \"sk-\"",
+    "\"sk-or-v1-\" \"limit_remaining\"",
+    "\"OPENROUTER_API_KEY\" \".env\"",
+    "\"sk-or-v1-\" filename:docker-compose"
   ],
   "loop_every": 300,
   "verify_ssl": true,
