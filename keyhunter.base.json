@@ -222,7 +222,7 @@
   "netlas_key": "",
   "github_tokens_pool": [],
   "source_timeout": 900,
-  "shodan_budget": 780,
+  "shodan_budget": 300,
   "shodan_page_mult": 2,
   "disabled_sources": [
     "open-infra"

