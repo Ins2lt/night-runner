@@ -15797,6 +15797,12 @@ def render_report(v, redact=False):
         "no_balance": "🟠 Ключ валиден, но баланс исчерпан",
         "open_relay": "🔓 OPEN RELAY (ключи не проверяются — бесплатный эндпоинт)",
     }.get(status, status)
+    # 07.10: жир-маркер — находка с балансом >= 100 USD не должна тонуть в ленте
+    try:
+        if v.get("balance") is not None and float(v["balance"]) >= 100:
+            status_line = "💎 ЖИРНАЯ НАХОДКА — БАЛАНС >= $100\n" + status_line
+    except (TypeError, ValueError):
+        pass
     lines = [
         status_line,
         "🌐 Base URL: %s" % v.get("base", ""),
