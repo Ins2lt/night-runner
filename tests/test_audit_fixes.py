@@ -216,3 +216,55 @@ def test_api_hash_not_hardcoded():
 def test_verify_false_not_left_in_http_kwargs():
     src = Path(kh.__file__).read_text(encoding="utf-8")
     assert "verify=False" not in src
+
+
+# ---------------- 07.10 relay-intel + opendb-harvest additions ----------------
+
+def test_relay_family_headers():
+    fam = kh.relay_family({"X-New-Api-Version": "v1.0.0-rc.24-tokenflow", "x-oneapi-request-id": "abc"})
+    assert "new-api fork" in fam and "one-api" in fam and "tokenflow" in fam
+    assert kh.relay_family({}) == ""
+
+
+def test_gate_balance_parse_fullwidth_dollar():
+    body = '{"error":{"message":"预扣费额度失败, 用户剩余额度: ＄0.259752, 需要预扣费额度: ＄18.000016","code":"insufficient_user_quota"}}'
+    assert any(mk in body for mk in kh.GATE_QUOTA_MARKERS)
+    amounts = __import__("re").findall(r"[$＄]\s?([0-9]+(?:\.[0-9]+)?)", body)
+    assert amounts and float(amounts[0]) == pytest.approx(0.259752)
+
+
+def test_opendb_harvest_named_and_bare():
+    t = "🗄️ OPEN ELASTIC http://39.107.93.224:9200\n3 индексов\nhttp://113.45.46.130:9200 тоже открыт"
+    hosts = kh.harvest_opendb_hosts(t)
+    kinds = {(k, ip) for k, ip, p in hosts}
+    assert ("elastic", "39.107.93.224") in kinds
+    assert ("elastic", "113.45.46.130") in kinds
+    assert all(p in (9200, 27017, 6379, 5984) for _, _, p in hosts)
+
+
+def test_render_report_relay_block():
+    v = {
+        "ts": 1700000000,
+        "status": "working",
+        "tag": "skgen",
+        "base": "https://api.zhehentiaohe.cn/v1",
+        "key": "sk-" + "x" * 40,
+        "models": ["gpt-6-astra"],
+        "n_models": 1,
+        "stars_listed": ["gpt-6-astra"],
+        "stars_working": [],
+        "balance": 0.259752,
+        "relay": {
+            "family": "new-api fork v1.0.0-rc.24-tokenflow",
+            "wires": {"chat_completions": True, "responses": True, "messages": False},
+            "real_balance_usd": 0.259752,
+            "rates_top": [{"model": "gpt-6-astra", "in_usd": 1.2, "out_usd": 6.0}],
+            "hidden_models": ["gpt-6.1-sol"],
+        },
+        "origin": "t",
+    }
+    out = kh.render_report(v)
+    assert "🏭 Релей: new-api fork" in out
+    assert "Остаток по гейту" in out
+    assert "gpt-6.1-sol" in out
+    assert "responses" in out

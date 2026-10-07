@@ -91,7 +91,17 @@
     "SUPABASE_SERVICE_ROLE_KEY=",
     "AZURE_OPENAI_API_KEY=",
     "WorkosCursorSessionToken=",
-    "kimi-k3 api_key"
+    "kimi-k3 api_key",
+    "gpt-6-astra sk-",
+    "gpt-6.1-sol sk-",
+    "gpt-6-luna sk-",
+    "insufficient_user_quota sk-",
+    "api.qnaigc.com sk-",
+    "api.modelverse.cn sk-",
+    "api.evolink.ai sk-",
+    "api.zhehentiaohe.cn sk-",
+    "pbtest.neusis.ai sk-",
+    "new-api sk- gpt-6"
   ],
   "shodan_queries": [
     "http.html:\"sk-ant-api03\"",
@@ -183,7 +193,18 @@
     "site:justpaste.it claude pro",
     "\"claude max\" \"mail:pass\"",
     "\"chatgpt plus\" \"email:password\"",
-    "combo list claude"
+    "combo list claude",
+    "\"gpt-6-astra\" \"sk-\"",
+    "\"gpt-6.1-sol\" \"sk-\"",
+    "\"gpt-6-luna\" \"sk-\"",
+    "\"insufficient_user_quota\"",
+    "\"x-new-api-version\"",
+    "\"api.qnaigc.com\" \"sk-\"",
+    "\"api.modelverse.cn\" \"sk-\"",
+    "\"api.evolink.ai\" \"sk-\"",
+    "\"api.zhehentiaohe.cn\" \"sk-\"",
+    "\"pbtest.neusis.ai\" \"sk-\"",
+    "\"/api/pricing\" \"sk-\""
   ],
   "loop_every": 300,
   "verify_ssl": true,
