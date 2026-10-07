@@ -1,4 +1,4 @@
-name: night-hunt
+name: night-cycle
 # schedule-refresh: 2026-09-08T16Z
 
 on:
@@ -10,7 +10,7 @@ permissions:
   contents: write             # keepalive-коммит (иначе schedule уснёт через 60 дней тишины)
 
 concurrency:
-  group: night-hunt           # не пускаем наложение прогонов
+  group: night-cycle           # не пускаем наложение прогонов
   cancel-in-progress: false
 
 jobs:
@@ -67,11 +67,18 @@ jobs:
           LEAKIX_KEY: ${{ secrets.LEAKIX_KEY }}
           VT_KEY: ${{ secrets.VT_KEY }}
           FOFA_KEY: ${{ secrets.FOFA_KEY }}
+          FOFA_EMAIL: ${{ secrets.FOFA_EMAIL }}
+          CENSYS_ID: ${{ secrets.CENSYS_ID }}
+          CENSYS_SECRET: ${{ secrets.CENSYS_SECRET }}
           ZOOMEYE_KEY: ${{ secrets.ZOOMEYE_KEY }}
           NETLAS_KEY: ${{ secrets.NETLAS_KEY }}
+          HUNTER_KEY: ${{ secrets.HUNTER_KEY }}
+          TG_OWNER_ID: ${{ secrets.TG_OWNER_ID }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         run: python make_config.py
 
-      - name: Run full keyhunter cycle
+      - name: Run full scan cycle
         run: python night_run.py
 
       # находки — в ПРИВАТНЫЙ vault-репо (полный стор доступен для просмотра,
@@ -83,7 +90,7 @@ jobs:
         run: |
           [ -f keyhunter_found.jsonl ] || exit 0
           rm -rf vault
-          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/Ins2lt/night-vault.git" vault || mkdir vault
+          git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" clone --depth 1 https://github.com/Ins2lt/night-vault.git vault || mkdir vault
           cp keyhunter_found.jsonl vault/ 2>/dev/null || true
           cp keyhunter_dead.jsonl vault/ 2>/dev/null || true
           cd vault
@@ -94,7 +101,7 @@ jobs:
             echo "no changes"
           else
             git commit -m "vault $(date -u +%FT%TZ)"
-            git push || echo "push failed — следующий цикл повторит"
+            git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" push || echo "push failed — следующий цикл повторит"
           fi
 
       - name: Save hunter state

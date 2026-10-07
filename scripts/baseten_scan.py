@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""🔷 BASETEN-STRIKE: выполняется на GH-раннере (чистый IP, HF без рейт-лимита).
-HF full-text по всем baseten-нормам + claudeAiOauth-волне -> литеральные ключи
--> management-судья (api.baseten.co) -> inference-чат (баланс).
-ort01 -> refresh-exchange -> свежий oat01 -> тир Claude (Pro/Max)."""
+"""🔷 BASETEN-SCAN: выполняется на GH-раннере (чистый IP, HF без рейт-лимита).
+HF full-text по baseten/claudeAiOauth-паттернам -> литеральные ключи
+-> management-проверка (api.baseten.co) -> inference-чат (баланс).
+ort01 -> refresh-exchange -> oat01 (тир Claude)."""
 
 import concurrent.futures
 import json
@@ -18,7 +18,10 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 TG = os.environ.get("TG_TOKEN", "")
-CHAT = int(os.environ.get("TG_CHAT", "0") or 0)
+try:
+    CHAT = int(os.environ.get("TG_CHAT", "0") or 0)
+except ValueError:
+    CHAT = 0
 
 
 def tg(msg):
@@ -131,7 +134,7 @@ print(
 )
 
 
-# ---- BASETEN: management-судья + inference-чат ----
+# ---- BASETEN: management-проверка + inference-чат ----
 def mgmt_check(k):
     try:
         r = requests.get(
@@ -185,7 +188,7 @@ def baseten_verify(item):
         return (k, src, [], None)
 
 
-print("\n=== management-судья (baseten) ===")
+print("\n=== management-проверка (baseten) ===")
 b_winners = []
 items = list(baseten_cands.items())
 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
@@ -305,14 +308,14 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             print("💎 OAT01 ЖИВ: %s… src=%s" % (k[:30], src))
             tg("💎 CLAUDE OAT01 ЖИВ (strike):\n%s\nsrc: %s" % (k, src))
 
-print("\nИТОГ STRIKE: baseten=%d | claude=%d" % (len(b_winners), len(c_winners)))
+print("\nИТОГ SCAN: baseten=%d | claude=%d" % (len(b_winners), len(c_winners)))
 if b_winners or c_winners:
     tg(
-        "⚔️ STRIKE ИТОГ: baseten живых %d, claude живых %d"
+        "🔷 SCAN ИТОГ: baseten живых %d, claude живых %d"
         % (len(b_winners), len(c_winners))
     )
 else:
     tg(
-        "⚔️ STRIKE закончен: %d baseten-кандидатов, %d ort01, %d oat01 — все проверены, живых нет (пул исчерпан)"
+        "🔷 SCAN закончен: %d baseten-кандидатов, %d ort01, %d oat01 — все проверены, живых нет (пул исчерпан)"
         % (len(baseten_cands), len(orts), len(oats))
     )

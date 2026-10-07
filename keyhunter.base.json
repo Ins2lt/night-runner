@@ -186,6 +186,8 @@
     "combo list claude"
   ],
   "loop_every": 300,
+  "verify_ssl": true,
+  "allow_private_targets": false,
   "urlscan_key": "",
   "kaggle_token": "",
   "censys_key": "",

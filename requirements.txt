@@ -1,5 +1,6 @@
-requests
-cloudscraper
-psycopg2-binary
-pymysql
-mmh3
+requests>=2.32.3
+urllib3>=2.7.0
+cloudscraper>=1.2.71
+psycopg2-binary>=2.9.9
+pymysql>=1.1.0
+mmh3>=4.1.0

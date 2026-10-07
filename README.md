@@ -1,6 +1,6 @@
 # night-runner
 
-Полный keyhunter на GitHub Actions, 24/7. ПК можно выключать.
+Полный сканер на GitHub Actions, 24/7. ПК можно выключать.
 
 - **Расписание**: каждые 30 минут (public repo — минуты Actions бесплатные).
 - **Секреты**: только в Actions Secrets (`GH_TOKEN`, `TG_TOKEN`, `TG_CHAT`,
@@ -12,5 +12,5 @@
 
 ## Управление
 
-- Стоп: Actions → night-hunt → ⋮ → Disable workflow
-- Ручной запуск: Actions → night-hunt → Run workflow
+- Стоп: Actions → night-cycle → ⋮ → Disable workflow
+- Ручной запуск: Actions → night-cycle → Run workflow

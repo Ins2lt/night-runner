@@ -1,4 +1,4 @@
-name: baseten-strike
+name: baseten-scan
 
 on:
   workflow_dispatch: {}
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: baseten-strike
+  group: baseten-scan
   cancel-in-progress: false
 
 jobs:
@@ -22,8 +22,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install requests
-      - name: Strike (HF full-text + management-судья)
+      - name: Scan (HF full-text + management-проверка)
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
-        run: python scripts/baseten_strike.py
+        run: python scripts/baseten_scan.py
