@@ -15971,6 +15971,9 @@ def post_telegram(text):
             )
             if r is not None and r.status_code not in (200,):
                 # chat_id невалиден (юзер удалил чат?) — сброс и редискавери
+                # 07.10: сбой TG теперь ВИДЕН в логе (раньше False уходил
+                # наверх без следа — "не сыпит" без причины)
+                log("  ⚠️ TG post HTTP %s: %s" % (r.status_code, (r.text or "")[:120]))
                 try:
                     if "chat not found" in (r.text or ""):
                         CFG["tg_chat"] = ""
@@ -18030,7 +18033,8 @@ def opendb_sweep(cycle):
                     )
                 )
     except ImportError:
-        pass
+        # 07.10: модуль не задеплоен — видимая строка вместо тишины
+        log("  opendb->loghunter: module absent in repo — acc/session парсинг выключен")
     except Exception as _e:
         log("  opendb->loghunter err: %s" % _e)
 
@@ -18541,7 +18545,11 @@ def run_once(extra_paths=(), post=True):
                 )
             )
     except ImportError:
-        pass
+        # 07.10: loghunter.py не задеплоен в репо — до этого умирал молча
+        # (ing 0s навсегда). Одна видимая строка за цикл, не спам.
+        log(
+            "  [loghunter     ] module absent in repo — email/tg-session парсинг выключен"
+        )
     except Exception as _lhe:
         log("  loghunter err: %s" % _lhe)
     t_ing = time.time()  # ФАЗЫ: +tg/loghunter ingest
