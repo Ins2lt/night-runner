@@ -1502,6 +1502,22 @@ KNOWN_BASES = {
     "https://spark-api-open.xf-yun.com/v1": None,
     "https://api.baichuan-ai.com/v1": None,
     "https://api.baseten.co/v1": None,
+    # 07.10: house relays (dj codex providers) + топ выгрузки ChatExport-20261007 —
+    # голые sk- теперь пробиваются и по ним
+    "https://api.modelverse.cn/v1": None,
+    "https://pbtest.neusis.ai/router/v1": None,
+    "https://api.evolink.ai/v1": None,
+    "https://api.zhehentiaohe.cn/v1": None,
+    "https://openai.qiniu.com/v1": None,
+    "https://poloai.top/v1": None,
+    "https://api.tokenrouter.com/v1": None,
+    "https://api.polza.ai/v1": None,
+    "https://tokenbox.you/v1": None,
+    "https://api.gonkarouter.io/v1": None,
+    "https://newapi.hpa888.top/v1": None,
+    "https://newapi.pockgo.com/v1": None,
+    "https://hub.linux.do/v1": None,
+    "https://api.longcat.chat/openai/v1": None,
 }
 # Базы, отдающие /models ВООБЩЕ без auth (проверено живьём 2026-09-10:
 # aimlapi — 937 моделей на голый GET). listed_only на них доказывает ноль —
