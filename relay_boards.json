@@ -1,62 +1,323 @@
 [
-  {"domain": "api.qnaigc.com", "api_base": "https://api.qnaigc.com/v1", "alive": true},
-  {"domain": "api.modelverse.cn", "api_base": "https://api.modelverse.cn/v1", "alive": true},
-  {"domain": "pbtest.neusis.ai", "api_base": "https://pbtest.neusis.ai/router/v1", "alive": true},
-  {"domain": "api.evolink.ai", "api_base": "https://api.evolink.ai/v1", "alive": true},
-  {"domain": "api.zhehentiaohe.cn", "api_base": "https://api.zhehentiaohe.cn/v1", "alive": true},
-  {"domain": "openai.qiniu.com", "api_base": "https://openai.qiniu.com/v1", "alive": true},
-  {"domain": "newapi.hpa888.top", "api_base": "https://newapi.hpa888.top/v1", "alive": true},
-  {"domain": "newapi.pockgo.com", "api_base": "https://newapi.pockgo.com/v1", "alive": true},
-  {"domain": "newapi-jp1.202820.xyz", "api_base": "https://newapi-jp1.202820.xyz/v1", "alive": true},
-  {"domain": "new-api-mjmwvyct.sealosbja.site", "api_base": "https://new-api-mjmwvyct.sealosbja.site/v1", "alive": true},
-  {"domain": "poloai.top", "api_base": "https://poloai.top/v1", "alive": true},
-  {"domain": "work.poloapi.com", "api_base": "https://work.poloapi.com/v1", "alive": true},
-  {"domain": "api.polza.ai", "api_base": "https://api.polza.ai/v1", "alive": true},
-  {"domain": "api.tokenrouter.com", "api_base": "https://api.tokenrouter.com/v1", "alive": true},
-  {"domain": "tokenbox.you", "api_base": "https://tokenbox.you/v1", "alive": true},
-  {"domain": "tokenus.net", "api_base": "https://tokenus.net/v1", "alive": true},
-  {"domain": "token.zasdas.com", "api_base": "https://token.zasdas.com/v1", "alive": true},
-  {"domain": "tokenrhythm.studio", "api_base": "https://tokenrhythm.studio/v1", "alive": true},
-  {"domain": "hub.linux.do", "api_base": "https://hub.linux.do/v1", "alive": true},
-  {"domain": "ggrokheavy.xyz", "api_base": "https://ggrokheavy.xyz/v1", "alive": true},
-  {"domain": "gpt.crax.lol", "api_base": "https://gpt.crax.lol/v1", "alive": true},
-  {"domain": "x666.me", "api_base": "https://x666.me/v1", "alive": true},
-  {"domain": "xiaoai.plus", "api_base": "https://xiaoai.plus/v1", "alive": true},
-  {"domain": "longdaoai.cn", "api_base": "https://longdaoai.cn/v1", "alive": true},
-  {"domain": "router.y7.hk", "api_base": "https://router.y7.hk/v1", "alive": true},
-  {"domain": "router.ktools.id", "api_base": "https://router.ktools.id/v1", "alive": true},
-  {"domain": "router.dvlpid.my.id", "api_base": "https://router.dvlpid.my.id/v1", "alive": true},
-  {"domain": "router.bynara.id", "api_base": "https://router.bynara.id/v1", "alive": true},
-  {"domain": "shufulei.net", "api_base": "https://shufulei.net/v1", "alive": true},
-  {"domain": "fluxionai.world", "api_base": "https://fluxionai.world/v1", "alive": true},
-  {"domain": "api.gonkarouter.io", "api_base": "https://api.gonkarouter.io/v1", "alive": true},
-  {"domain": "api.morphllm.com", "api_base": "https://api.morphllm.com/v1", "alive": true},
-  {"domain": "api.koboillm.com", "api_base": "https://api.koboillm.com/v1", "alive": true},
-  {"domain": "api.llmtech.eu", "api_base": "https://api.llmtech.eu/v1", "alive": true},
-  {"domain": "api.darkbloom.dev", "api_base": "https://api.darkbloom.dev/v1", "alive": true},
-  {"domain": "api.aptget.nl", "api_base": "https://api.aptget.nl/v1", "alive": true},
-  {"domain": "api.hcnsec.cn", "api_base": "https://api.hcnsec.cn/v1", "alive": true},
-  {"domain": "api.key77qiqi.com", "api_base": "https://api.key77qiqi.com/v1", "alive": true},
-  {"domain": "note3-prev-api.askdiandian.com", "api_base": "https://note3-prev-api.askdiandian.com/v1", "alive": true},
-  {"domain": "oneapi.xty.app", "api_base": "https://oneapi.xty.app/v1", "alive": true},
-  {"domain": "opengateway.gitlawb.com", "api_base": "https://opengateway.gitlawb.com/v1", "alive": true},
-  {"domain": "gcli.ggchan.dev", "api_base": "https://gcli.ggchan.dev/v1", "alive": true},
-  {"domain": "uni-api.cstcloud.cn", "api_base": "https://uni-api.cstcloud.cn/v1", "alive": true},
-  {"domain": "www.caicaicome888.top", "api_base": "https://www.caicaicome888.top/v1", "alive": true},
-  {"domain": "sub.alibb123.ccwu.cc", "api_base": "https://sub.alibb123.ccwu.cc/v1", "alive": true},
-  {"domain": "welfare.0xpsyche.me", "api_base": "https://welfare.0xpsyche.me/v1", "alive": true},
-  {"domain": "www.esnode.com", "api_base": "http://www.esnode.com/v1", "alive": true},
-  {"domain": "lwai.05info.com", "api_base": "https://lwai.05info.com:8887/v1", "alive": true},
-  {"domain": "glm53-flash.dtx-colab.com", "api_base": "https://glm53-flash.dtx-colab.com/v1", "alive": true},
-  {"domain": "ds2api-gs47.onrender.com", "api_base": "https://ds2api-gs47.onrender.com/v1", "alive": true},
-  {"domain": "9router-production-a99a.up.railway.app", "api_base": "https://9router-production-a99a.up.railway.app/v1", "alive": true},
-  {"domain": "gateway-production-e22b.up.railway.app", "api_base": "https://gateway-production-e22b.up.railway.app/v1", "alive": true},
-  {"domain": "api.longcat.chat", "api_base": "https://api.longcat.chat/openai/v1", "alive": true},
-  {"domain": "tunnel.zhishe.top", "api_base": "https://tunnel.zhishe.top/v1", "alive": true},
-  {"domain": "api.laozhang.ai", "api_base": "https://api.laozhang.ai/v1", "alive": true},
-  {"domain": "api.weelinking.com", "api_base": "https://api.weelinking.com/v1", "alive": true},
-  {"domain": "v2.aicodee.com", "api_base": "https://v2.aicodee.com/v1", "alive": true},
-  {"domain": "api.megallm.io", "api_base": "https://api.megallm.io/v1", "alive": true},
-  {"domain": "api.bluesminds.com", "api_base": "https://api.bluesminds.com/v1", "alive": true},
-  {"domain": "api.nexusmind.digital", "api_base": "https://api.nexusmind.digital/v1", "alive": true}
+ {
+  "domain": "api.qnaigc.com",
+  "api_base": "https://api.qnaigc.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.modelverse.cn",
+  "api_base": "https://api.modelverse.cn/v1",
+  "alive": true
+ },
+ {
+  "domain": "pbtest.neusis.ai",
+  "api_base": "https://pbtest.neusis.ai/router/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.evolink.ai",
+  "api_base": "https://api.evolink.ai/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.zhehentiaohe.cn",
+  "api_base": "https://api.zhehentiaohe.cn/v1",
+  "alive": true
+ },
+ {
+  "domain": "openai.qiniu.com",
+  "api_base": "https://openai.qiniu.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "newapi.hpa888.top",
+  "api_base": "https://newapi.hpa888.top/v1",
+  "alive": true
+ },
+ {
+  "domain": "newapi.pockgo.com",
+  "api_base": "https://newapi.pockgo.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "newapi-jp1.202820.xyz",
+  "api_base": "https://newapi-jp1.202820.xyz/v1",
+  "alive": true
+ },
+ {
+  "domain": "new-api-mjmwvyct.sealosbja.site",
+  "api_base": "https://new-api-mjmwvyct.sealosbja.site/v1",
+  "alive": true
+ },
+ {
+  "domain": "poloai.top",
+  "api_base": "https://poloai.top/v1",
+  "alive": true
+ },
+ {
+  "domain": "work.poloapi.com",
+  "api_base": "https://work.poloapi.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.polza.ai",
+  "api_base": "https://api.polza.ai/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.tokenrouter.com",
+  "api_base": "https://api.tokenrouter.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "tokenbox.you",
+  "api_base": "https://tokenbox.you/v1",
+  "alive": true
+ },
+ {
+  "domain": "tokenus.net",
+  "api_base": "https://tokenus.net/v1",
+  "alive": true
+ },
+ {
+  "domain": "token.zasdas.com",
+  "api_base": "https://token.zasdas.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "tokenrhythm.studio",
+  "api_base": "https://tokenrhythm.studio/v1",
+  "alive": true
+ },
+ {
+  "domain": "hub.linux.do",
+  "api_base": "https://hub.linux.do/v1",
+  "alive": true
+ },
+ {
+  "domain": "ggrokheavy.xyz",
+  "api_base": "https://ggrokheavy.xyz/v1",
+  "alive": true
+ },
+ {
+  "domain": "gpt.crax.lol",
+  "api_base": "https://gpt.crax.lol/v1",
+  "alive": true
+ },
+ {
+  "domain": "x666.me",
+  "api_base": "https://x666.me/v1",
+  "alive": true
+ },
+ {
+  "domain": "xiaoai.plus",
+  "api_base": "https://xiaoai.plus/v1",
+  "alive": true
+ },
+ {
+  "domain": "longdaoai.cn",
+  "api_base": "https://longdaoai.cn/v1",
+  "alive": true
+ },
+ {
+  "domain": "router.y7.hk",
+  "api_base": "https://router.y7.hk/v1",
+  "alive": true
+ },
+ {
+  "domain": "router.ktools.id",
+  "api_base": "https://router.ktools.id/v1",
+  "alive": true
+ },
+ {
+  "domain": "router.dvlpid.my.id",
+  "api_base": "https://router.dvlpid.my.id/v1",
+  "alive": true
+ },
+ {
+  "domain": "router.bynara.id",
+  "api_base": "https://router.bynara.id/v1",
+  "alive": true
+ },
+ {
+  "domain": "shufulei.net",
+  "api_base": "https://shufulei.net/v1",
+  "alive": true
+ },
+ {
+  "domain": "fluxionai.world",
+  "api_base": "https://fluxionai.world/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.gonkarouter.io",
+  "api_base": "https://api.gonkarouter.io/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.morphllm.com",
+  "api_base": "https://api.morphllm.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.koboillm.com",
+  "api_base": "https://api.koboillm.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.llmtech.eu",
+  "api_base": "https://api.llmtech.eu/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.darkbloom.dev",
+  "api_base": "https://api.darkbloom.dev/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.aptget.nl",
+  "api_base": "https://api.aptget.nl/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.hcnsec.cn",
+  "api_base": "https://api.hcnsec.cn/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.key77qiqi.com",
+  "api_base": "https://api.key77qiqi.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "note3-prev-api.askdiandian.com",
+  "api_base": "https://note3-prev-api.askdiandian.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "oneapi.xty.app",
+  "api_base": "https://oneapi.xty.app/v1",
+  "alive": true
+ },
+ {
+  "domain": "opengateway.gitlawb.com",
+  "api_base": "https://opengateway.gitlawb.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "gcli.ggchan.dev",
+  "api_base": "https://gcli.ggchan.dev/v1",
+  "alive": true
+ },
+ {
+  "domain": "uni-api.cstcloud.cn",
+  "api_base": "https://uni-api.cstcloud.cn/v1",
+  "alive": true
+ },
+ {
+  "domain": "www.caicaicome888.top",
+  "api_base": "https://www.caicaicome888.top/v1",
+  "alive": true
+ },
+ {
+  "domain": "sub.alibb123.ccwu.cc",
+  "api_base": "https://sub.alibb123.ccwu.cc/v1",
+  "alive": true
+ },
+ {
+  "domain": "welfare.0xpsyche.me",
+  "api_base": "https://welfare.0xpsyche.me/v1",
+  "alive": true
+ },
+ {
+  "domain": "www.esnode.com",
+  "api_base": "http://www.esnode.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "lwai.05info.com",
+  "api_base": "https://lwai.05info.com:8887/v1",
+  "alive": true
+ },
+ {
+  "domain": "glm53-flash.dtx-colab.com",
+  "api_base": "https://glm53-flash.dtx-colab.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "ds2api-gs47.onrender.com",
+  "api_base": "https://ds2api-gs47.onrender.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "9router-production-a99a.up.railway.app",
+  "api_base": "https://9router-production-a99a.up.railway.app/v1",
+  "alive": true
+ },
+ {
+  "domain": "gateway-production-e22b.up.railway.app",
+  "api_base": "https://gateway-production-e22b.up.railway.app/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.longcat.chat",
+  "api_base": "https://api.longcat.chat/openai/v1",
+  "alive": true
+ },
+ {
+  "domain": "tunnel.zhishe.top",
+  "api_base": "https://tunnel.zhishe.top/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.laozhang.ai",
+  "api_base": "https://api.laozhang.ai/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.weelinking.com",
+  "api_base": "https://api.weelinking.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "v2.aicodee.com",
+  "api_base": "https://v2.aicodee.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.megallm.io",
+  "api_base": "https://api.megallm.io/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.bluesminds.com",
+  "api_base": "https://api.bluesminds.com/v1",
+  "alive": true
+ },
+ {
+  "domain": "api.nexusmind.digital",
+  "api_base": "https://api.nexusmind.digital/v1",
+  "alive": true
+ },
+ {
+  "domain": "ai.poloai.top",
+  "alive": true,
+  "framework": "discovered:crtsh",
+  "name": null,
+  "api_base": "https://ai.poloai.top"
+ },
+ {
+  "domain": "api.poloai.top",
+  "alive": true,
+  "framework": "discovered:crtsh",
+  "name": null,
+  "api_base": "https://api.poloai.top"
+ },
+ {
+  "domain": "one.poloai.top",
+  "alive": true,
+  "framework": "discovered:crtsh",
+  "name": null,
+  "api_base": "https://one.poloai.top"
+ }
 ]
