@@ -326,5 +326,19 @@
   "framework": "discovered:crtsh",
   "name": null,
   "api_base": "https://gpt.tokenrhythm.studio"
+ },
+ {
+  "domain": "api.xiaoai.plus",
+  "alive": true,
+  "framework": "discovered:crtsh",
+  "name": null,
+  "api_base": "https://api.xiaoai.plus"
+ },
+ {
+  "domain": "chat.xiaoai.plus",
+  "alive": true,
+  "framework": "discovered:crtsh",
+  "name": null,
+  "api_base": "https://chat.xiaoai.plus"
  }
 ]
