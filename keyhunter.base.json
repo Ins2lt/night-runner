@@ -104,7 +104,13 @@
     "new-api sk- gpt-6",
     "OPENROUTER_API_KEY",
     "NEXT_PUBLIC_OPENROUTER",
-    "openrouter sk-or-v1"
+    "openrouter sk-or-v1",
+    "AIzaSy",
+    "AQ.Ab8",
+    "generativelanguage AIza",
+    "GEMINI_API_KEY AIza",
+    "gemini-4-argon",
+    "AIzaSy eap"
   ],
   "shodan_queries": [
     "http.html:\"sk-ant-api03\"",
@@ -117,7 +123,10 @@
     "http.title:\"phpMyAdmin\" \"api_key\"",
     "http.html:\".env\" \"API_KEY\"",
     "port:3000 http.html:\"new-api\"",
-    "port:3001 http.html:\"one-api\""
+    "port:3001 http.html:\"one-api\"",
+    "http.html:\"AIzaSy\"",
+    "http.html:\"AQ.Ab8\"",
+    "http.html:\"generativelanguage.googleapis.com\""
   ],
   "http_only": false,
   "relay_boards": [],
@@ -210,7 +219,17 @@
     "\"/api/pricing\" \"sk-\"",
     "\"sk-or-v1-\" \"limit_remaining\"",
     "\"OPENROUTER_API_KEY\" \".env\"",
-    "\"sk-or-v1-\" filename:docker-compose"
+    "\"sk-or-v1-\" filename:docker-compose",
+    "\"AIzaSy\" \"generativelanguage\"",
+    "\"AQ.Ab8\" gemini",
+    "\"AQ.Ab8\" api key",
+    "\"gemini-4-argon\" key",
+    "site:rentry.co \"AIza\"",
+    "site:telegra.ph \"AIza\"",
+    "site:pastebin.com \"AIzaSy\"",
+    "site:gist.github.com \"AIzaSy\"",
+    "site:justpaste.it \"AIza\"",
+    "site:controlc.com \"AIza\""
   ],
   "loop_every": 300,
   "verify_ssl": true,

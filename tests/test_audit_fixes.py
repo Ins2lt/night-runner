@@ -268,3 +268,70 @@ def test_render_report_relay_block():
     assert "Остаток по гейту" in out
     assert "gpt-6.1-sol" in out
     assert "responses" in out
+
+
+# ---------------------------------------------------------------- 2026-10-16
+def _grec(status, stars=None, working=None, tag="google"):
+    return {
+        "ts": 1700000000,
+        "status": status,
+        "tag": tag,
+        "base": "https://generativelanguage.googleapis.com/v1beta",
+        "key": ("AIza" + "A" * 35) if tag == "google" else ("AQ.Ab8" + "A" * 40),
+        "models": [],
+        "n_models": 0,
+        "stars_listed": stars or [],
+        "stars_working": working or [],
+        "balance": None,
+        "origin": "t",
+    }
+
+
+def test_google_aq_pattern_extracts():
+    # синтетический размешанный токен (JUNKY_KEY_RE режет односимвольные
+    # хвосты — by design; точная копия реального трипает push protection)
+    cands = kh.extract_candidates(
+        "GEMINI_KEY=AQ.Ab8" + "Xy7Kp2Qm9Vw4Rt6Zs1Hj8Nf3Lb5Dc0Gx"
+    )
+    tags = [t for _, t, *_ in cands]
+    assert "google-aq" in tags, tags
+    # обрубок — не ключ
+    assert "google-aq" not in [
+        t for _, t, *_ in kh.extract_candidates("AQ.Ab8short")
+    ]
+
+
+def test_google_fat_star_regexes():
+    assert kh.STAR_RE.search("gemini-4-argon")
+    assert kh.STAR_RE.search("gemini-2.5-pro")
+    assert kh.GOOGLE_FAT_RE.search("gemini-4-argon")
+    assert kh.GOOGLE_FAT_RE.search("gemini-3.1-pro-preview")
+    assert not kh.GOOGLE_FAT_RE.search("gemini-2.5-flash")
+
+
+def test_google_gate_no_lead_spam(monkeypatch):
+    posted = []
+    monkeypatch.setattr(kh, "post_telegram", lambda *a, **k: posted.append(a) or True)
+    # listed_only / 403 / кап — НЕ в чат (в стор), независимо от жира
+    assert kh.post_finding_now(_grec("listed_only")) is False
+    assert kh.post_finding_now(_grec("listed_only", stars=["gemini-4-argon"])) is False
+    assert kh.post_finding_now(_grec("listed_only", tag="google-aq")) is False
+    # working с рабочей звездой — постим
+    assert (
+        kh.post_finding_now(
+            _grec("working", stars=["gemini-4-argon"], working=["gemini-4-argon"])
+        )
+        is True
+    )
+    assert len(posted) == 1
+    assert "google-aq" in kh.NON_LLM_TAGS
+
+
+def test_evolve_digest_silenced(monkeypatch):
+    posted = []
+    monkeypatch.setattr(kh, "post_telegram", lambda *a, **k: posted.append(a) or True)
+    kh._EVOLVE_CYCLE_BUFFER = ["WHISPER_API_KEY", "STRAPI_ADMIN_OPENAI_KEY"]
+    kh.evolve_flush_digest()
+    assert posted == [], "эволюция снова спамит в TG"
+    # эволюционные запросы больше не едят слоты ротации
+    assert kh.evolved_queries_for_rotation() == []

