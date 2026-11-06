@@ -7559,10 +7559,7 @@ class OpenInfraSweep(Source):
                                 res.get("key") or ""
                             ).startswith("sk-"):
                                 try:
-                                    post_telegram(
-                                        "🆓 OPEN-INFRA [%s]\n🌐 %s\n%s"
-                                        % (kind, res["base"], res["tier"])
-                                    )
+                                    pass
                                 except Exception:
                                     pass
                             else:
@@ -7586,7 +7583,7 @@ class OpenInfraSweep(Source):
         for kind, items in _oi_batch.items():
             try:
                 hosts = "\n".join("🌐 %s" % x["base"] for x in items[:8])
-                post_telegram("🆓 OPEN-INFRA [%s] x%d\n%s" % (kind, len(items), hosts))
+                pass  # silenced open-infra spam
             except Exception:
                 pass
         return out
